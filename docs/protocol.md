@@ -63,3 +63,7 @@ Datagram boundaries are preserved. SOCKS5 fragmentation is not supported; packet
 ## Future QUIC mapping
 
 The control request maps to the first bytes of each QUIC bidirectional stream. A TCP target maps one-to-one to a QUIC stream. UDP maps to QUIC Datagram only after iPad interoperability and path-MTU behavior pass the compatibility gate. Version 1 does not advertise QUIC support.
+
+## Shared compatibility fixture
+
+`testdata/protocol-v1.json` is the single golden-wire source consumed by both `internal/protocol/fixture_test.go` and `ios/Tests/IPadProxyCoreTests/SharedProtocolFixtureTests.swift`. Any intentional wire-format change must update the protocol version and both decoders; changing only one implementation must fail CI/local tests.
