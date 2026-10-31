@@ -95,6 +95,12 @@ func canonicalUDPAddr(addr *net.UDPAddr) (netip.AddrPort, bool) {
 }
 
 func (s *Server) handleUDP(ctx context.Context, tunnel net.Conn) {
+	if !s.udp.tryAcquire() {
+		s.writeResponse(tunnel, protocol.StatusInternal, "UDP capacity reached")
+		return
+	}
+	defer s.udp.release()
+
 	udp, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		s.writeResponse(tunnel, protocol.StatusInternal, "UDP unavailable")
@@ -109,26 +115,26 @@ func (s *Server) handleUDP(ctx context.Context, tunnel net.Conn) {
 	_ = tunnel.SetDeadline(time.Time{})
 	s.cfg.Logger.Info("UDP association opened", "remote", remoteIP(tunnel))
 
-	var once sync.Once
-	done := make(chan struct{})
-	stop := func() { once.Do(func() { close(done); _ = udp.Close(); _ = tunnel.SetDeadline(time.Now()) }) }
-	defer stop()
+	associationCtx, cancel := context.WithCancel(ctx)
+	watcherDone := make(chan struct{})
 	go func() {
-		select {
-		case <-ctx.Done():
-			stop()
-		case <-done:
-		}
+		defer close(watcherDone)
+		<-associationCtx.Done()
+		_ = udp.Close()
+		_ = tunnel.SetDeadline(time.Now())
 	}()
 
 	peers := newUDPPeerSet()
 	errs := make(chan error, 2)
-	go func() { errs <- s.udpTunnelToNetwork(tunnel, udp, peers) }()
+	go func() { errs <- s.udpTunnelToNetwork(associationCtx, tunnel, udp, peers) }()
 	go func() { errs <- s.udpNetworkToTunnel(tunnel, udp, peers) }()
 	<-errs
+	cancel()
+	<-errs
+	<-watcherDone
 }
 
-func (s *Server) udpTunnelToNetwork(tunnel net.Conn, udp *net.UDPConn, peers *udpPeerSet) error {
+func (s *Server) udpTunnelToNetwork(ctx context.Context, tunnel net.Conn, udp *net.UDPConn, peers *udpPeerSet) error {
 	for {
 		_ = tunnel.SetReadDeadline(time.Now().Add(s.cfg.UDPIdleTimeout))
 		body, err := protocol.ReadFrame(tunnel)
@@ -141,8 +147,8 @@ func (s *Server) udpTunnelToNetwork(tunnel net.Conn, udp *net.UDPConn, peers *ud
 		}
 		// Activity in either direction keeps the association alive.
 		_ = udp.SetReadDeadline(time.Now().Add(s.cfg.UDPIdleTimeout))
-		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.DialTimeout)
-		ips, forbidden, err := s.resolveAllowed(ctx, d.Target)
+		lookupCtx, cancel := context.WithTimeout(ctx, s.cfg.DialTimeout)
+		ips, forbidden, err := s.resolveAllowed(lookupCtx, d.Target)
 		cancel()
 		if forbidden {
 			continue

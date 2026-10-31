@@ -6,6 +6,9 @@
     "REPLACE_WITH_PROXY_TOKEN_SHA256_OUTPUT"
   ],
   "allow_private_destinations": false,
+  "max_connections": 1024,
+  "max_handshakes": 64,
+  "max_udp_associations": 256,
   "handshake_timeout": "10s",
   "dial_timeout": "10s",
   "io_timeout": "5m",

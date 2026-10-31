@@ -44,7 +44,7 @@ func run(path string, logger *slog.Logger) error {
 		return fmt.Errorf("load certificate: %w", err)
 	}
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13, NextProtos: []string{protocol.ALPN}}
-	srv, err := server.New(server.Config{TLSConfig: tlsConfig, TokenHashes: hashes, AllowPrivateDestinations: cfg.AllowPrivateDestinations, HandshakeTimeout: cfg.HandshakeTimeout.Value(10 * time.Second), DialTimeout: cfg.DialTimeout.Value(10 * time.Second), IOTimeout: cfg.IOTimeout.Value(5 * time.Minute), UDPIdleTimeout: cfg.UDPIdleTimeout.Value(2 * time.Minute), ShutdownTimeout: cfg.ShutdownTimeout.Value(10 * time.Second), Logger: logger})
+	srv, err := server.New(server.Config{TLSConfig: tlsConfig, TokenHashes: hashes, AllowPrivateDestinations: cfg.AllowPrivateDestinations, MaxConnections: cfg.MaxConnections, MaxHandshakes: cfg.MaxHandshakes, MaxUDPAssociations: cfg.MaxUDPAssociations, HandshakeTimeout: cfg.HandshakeTimeout.Value(10 * time.Second), DialTimeout: cfg.DialTimeout.Value(10 * time.Second), IOTimeout: cfg.IOTimeout.Value(5 * time.Minute), UDPIdleTimeout: cfg.UDPIdleTimeout.Value(2 * time.Minute), ShutdownTimeout: cfg.ShutdownTimeout.Value(10 * time.Second), Logger: logger})
 	if err != nil {
 		return err
 	}

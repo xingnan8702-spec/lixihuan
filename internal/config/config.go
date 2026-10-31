@@ -38,6 +38,9 @@ type Server struct {
 	PrivateKeyFile           string   `json:"private_key_file"`
 	TokenSHA256              []string `json:"token_sha256"`
 	AllowPrivateDestinations bool     `json:"allow_private_destinations"`
+	MaxConnections           int      `json:"max_connections"`
+	MaxHandshakes            int      `json:"max_handshakes"`
+	MaxUDPAssociations       int      `json:"max_udp_associations"`
 	HandshakeTimeout         Duration `json:"handshake_timeout"`
 	DialTimeout              Duration `json:"dial_timeout"`
 	IOTimeout                Duration `json:"io_timeout"`
