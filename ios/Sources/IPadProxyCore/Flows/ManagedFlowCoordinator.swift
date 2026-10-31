@@ -191,9 +191,9 @@ public actor ManagedFlowCoordinator {
     }
 }
 
-/// A TCP stream that releases its Fake IP lease and flow permit after closing
-/// the underlying stream. EOF and every underlying I/O error perform the same
-/// cleanup automatically before the original error is rethrown.
+/// A TCP stream that releases its Fake IP lease and flow permit after both
+/// directions finish, or immediately after an explicit close or I/O error.
+/// A remote EOF finishes only the read side so the caller may continue sending.
 public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
     private let stream: any TCPByteStream
     private let lease: FakeIPLease?
@@ -202,7 +202,9 @@ public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
     private let limiter: FlowLimiter
     private let registry: ManagedFlowRegistry
     private let registrationID: UUID
-    private var isClosed = false
+    private var readFinished = false
+    private var writeFinished = false
+    private var finishTask: Task<Void, Error>?
     private var cleanupTask: Task<Void, Never>?
 
     init(
@@ -224,7 +226,9 @@ public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
     }
 
     public func send(_ bytes: Data) async throws {
-        guard !isClosed else { throw TransportError.closed }
+        guard cleanupTask == nil, finishTask == nil, !writeFinished else {
+            throw TransportError.closed
+        }
         do {
             try await stream.send(bytes)
         } catch {
@@ -234,10 +238,14 @@ public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
     }
 
     public func receive(maxBytes: Int) async throws -> Data? {
-        guard !isClosed else { return nil }
+        guard cleanupTask == nil else { return nil }
+        guard !readFinished else { return nil }
         do {
             let bytes = try await stream.receive(maxBytes: maxBytes)
-            if bytes == nil { await cleanup() }
+            if bytes == nil {
+                readFinished = true
+                await cleanupIfBothDirectionsFinished()
+            }
             return bytes
         } catch {
             await cleanup()
@@ -245,13 +253,30 @@ public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
         }
     }
 
-    /// Half-closes only the write side on success. An underlying failure is
-    /// terminal and releases all flow ownership before being rethrown.
+    /// Half-closes only the write side on success. Calls that overlap share one
+    /// underlying finish operation, and no new send is accepted once it starts.
+    /// An underlying failure is terminal and releases all flow ownership.
     public func finishSending() async throws {
-        guard !isClosed else { throw TransportError.closed }
+        guard cleanupTask == nil else { throw TransportError.closed }
+        if writeFinished { return }
+
+        let task: Task<Void, Error>
+        if let finishTask {
+            task = finishTask
+        } else {
+            let stream = stream
+            task = Task { try await stream.finishSending() }
+            finishTask = task
+        }
+
         do {
-            try await stream.finishSending()
+            try await task.value
+            guard cleanupTask == nil else { throw TransportError.closed }
+            writeFinished = true
+            finishTask = nil
+            await cleanupIfBothDirectionsFinished()
         } catch {
+            finishTask = nil
             await cleanup()
             throw error
         }
@@ -261,12 +286,17 @@ public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
         await cleanup()
     }
 
+    private func cleanupIfBothDirectionsFinished() async {
+        if readFinished && writeFinished {
+            await cleanup()
+        }
+    }
+
     private func cleanup() async {
         if let cleanupTask {
             await cleanupTask.value
             return
         }
-        isClosed = true
         let stream = stream
         let lease = lease
         let fakeIPStore = fakeIPStore

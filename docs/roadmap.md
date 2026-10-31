@@ -42,6 +42,24 @@
 
 This version is published on its review branch. The Apple Packet Tunnel still needs a real user-space stack and adapters.
 
+## v0.2.3: basic iPad app shell, local only
+
+- SwiftUI iPad configuration and status UI
+- Shared Keychain token storage and App Group non-secret configuration
+- JSON rule file import with security-scoped access and size limits
+- Reused `NETunnelProviderManager` profile with install/start/stop/status observation
+- XcodeGen App and Packet Tunnel Extension targets, plists, and entitlements
+- Fail-closed extension entry until the packet stack is integrated
+
+## v0.2.5: local UDP and DNS integration, awaiting Apple validation
+
+- Strict SOCKS5 UDP ASSOCIATE control and UDP datagram codecs
+- Loopback UDP relay with 256 fixed-target sessions and 60-second idle expiry
+- Separate literal-IP DIRECT and PROXY DNS upstream configuration
+- Action-preserving DNS UDP/TCP transport adapters and Fake DNS interception
+- HEV UDP mode and fail-closed Packet Tunnel composition
+- Swift core tests complete; Xcode typecheck and physical-iPad validation remain release gates
+
 ## v0.3: high-performance UDP
 
 - Swift Network.framework to Go QUIC interoperability spike

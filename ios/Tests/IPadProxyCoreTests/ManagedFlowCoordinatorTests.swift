@@ -131,21 +131,53 @@ final class ManagedFlowCoordinatorTests: XCTestCase, @unchecked Sendable {
         await XCTAssertEqualAsync(await limiter.snapshot.active, 0)
     }
 
-    func testTCPEOFAndRepeatedCloseCleanUpExactlyOnce() async throws {
+    func testTCPEOFKeepsOwnershipUntilExplicitCloseAndCleansExactlyOnce() async throws {
         let direct = RecordingTransport(tcpReceiveValues: [nil])
         let setup = try makeCoordinator(final: .direct, direct: direct, proxy: RecordingTransport())
         let flow = try await setup.coordinator.openTCP(to: Address.domain("eof.example", port: 443))
         let stream = try await XCTUnwrapAsync(await direct.lastTCPStream())
 
         await XCTAssertNilAsync(try await flow.receive(maxBytes: 1_024))
+        await XCTAssertFalseAsync(await stream.isClosed)
+        await XCTAssertEqualAsync(await setup.limiter.snapshot.active, 1)
+        await XCTAssertEqualAsync(await setup.coordinator.snapshot.active, 1)
+
         await flow.close()
         await flow.close()
         await XCTAssertEqualAsync(await stream.closeCount, 1)
         await XCTAssertEqualAsync(await setup.limiter.snapshot.active, 0)
+        await XCTAssertEqualAsync(await setup.coordinator.snapshot.active, 0)
     }
 
-    func testFinishSendingDoesNotReleaseUntilClose() async throws {
-        let direct = RecordingTransport()
+    func testRemoteFINAllowsSendThenFinishReleasesLeasePermitAndRegistration() async throws {
+        let direct = RecordingTransport(tcpReceiveValues: [nil])
+        let setup = try makeCoordinator(final: .direct, direct: direct, proxy: RecordingTransport())
+        let fakeAddress = try await setup.store.address(for: "remote-fin.example", family: .ipv4)
+        let flow = try await setup.coordinator.openTCP(
+            to: Address.ipv4(fakeAddress.rawBytes, port: 443)
+        )
+        let stream = try await XCTUnwrapAsync(await direct.lastTCPStream())
+
+        await XCTAssertNilAsync(try await flow.receive(maxBytes: 1_024))
+        await XCTAssertFalseAsync(await stream.isClosed)
+        await XCTAssertEqualAsync(await setup.store.activeLeaseCount, 1)
+        await XCTAssertEqualAsync(await setup.limiter.snapshot.active, 1)
+        await XCTAssertEqualAsync(await setup.coordinator.snapshot.active, 1)
+
+        let trailingUpload = Data([0xde, 0xad, 0xbe, 0xef])
+        try await flow.send(trailingUpload)
+        await XCTAssertEqualAsync(await stream.sentValues(), [trailingUpload])
+        try await flow.finishSending()
+
+        await XCTAssertTrueAsync(await stream.didFinishSending)
+        await XCTAssertEqualAsync(await stream.closeCount, 1)
+        await XCTAssertEqualAsync(await setup.store.activeLeaseCount, 0)
+        await XCTAssertEqualAsync(await setup.limiter.snapshot.active, 0)
+        await XCTAssertEqualAsync(await setup.coordinator.snapshot.active, 0)
+    }
+
+    func testFinishSendingRejectsFurtherSendAndCleansAfterRemoteEOF() async throws {
+        let direct = RecordingTransport(tcpReceiveValues: [nil])
         let setup = try makeCoordinator(final: .direct, direct: direct, proxy: RecordingTransport())
         let flow = try await setup.coordinator.openTCP(to: Address.domain("half.example", port: 443))
         let stream = try await XCTUnwrapAsync(await direct.lastTCPStream())
@@ -154,9 +186,17 @@ final class ManagedFlowCoordinatorTests: XCTestCase, @unchecked Sendable {
         await XCTAssertTrueAsync(await stream.didFinishSending)
         await XCTAssertFalseAsync(await stream.isClosed)
         await XCTAssertEqualAsync(await setup.limiter.snapshot.active, 1)
+        do {
+            try await flow.send(Data([1]))
+            XCTFail("send after finishSending must fail")
+        } catch {
+            XCTAssertEqual(error as? TransportError, .closed)
+        }
 
-        await flow.close()
+        await XCTAssertNilAsync(try await flow.receive(maxBytes: 1_024))
+        await XCTAssertEqualAsync(await stream.closeCount, 1)
         await XCTAssertEqualAsync(await setup.limiter.snapshot.active, 0)
+        await XCTAssertEqualAsync(await setup.coordinator.snapshot.active, 0)
     }
 
     func testUDPUsesManagedCleanupAndEOFRelease() async throws {
@@ -326,6 +366,7 @@ final class ManagedFlowCoordinatorTests: XCTestCase, @unchecked Sendable {
             group.addTask { await setup.coordinator.closeAll() }
             group.addTask { await flow.close() }
             group.addTask { _ = try? await flow.receive(maxBytes: 1) }
+            group.addTask { try? await flow.finishSending() }
         }
 
         await XCTAssertEqualAsync(await stream.closeCount, 1)

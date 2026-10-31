@@ -1,6 +1,8 @@
-# iOS v0.2.2 core 与 Packet Tunnel 接入边界
+# iOS v0.2.5 本地 UDP 与 DNS Packet Tunnel 接线
 
-`ios/` 包含一个可在 Linux 测试的 Swift 6 core package，以及不纳入 SwiftPM target 的 Apple Packet Tunnel 接入模板。core 已实现 v0.2.2 的受管 flow 生命周期、action-preserving DNS upstream 服务，以及 v0.2.1 的协议、Fake IP lease、有界资源原语、生命周期控制、规则存储、路由和传输边界；仓库仍不包含可运行 VPN 所需的 reviewed user-space TCP/IP stack、Xcode targets、entitlements 或 provisioning。
+`ios/` 包含可在 Linux 测试的 Swift 6 core、SwiftUI iPad containing app、Packet Tunnel Extension 和 XcodeGen 工程描述。v0.2.5 在 v0.2.4.1 的 TCP 生命周期基础上接入 SOCKS5 UDP ASSOCIATE、本地 UDP relay、双上游 DNS resolver、Fake DNS UDP/TCP interception 和严格 DNS literal 配置。packet stack 仍保持先安装 settings、后启动读取。
+
+当前代码是本地恢复版本，不应仅凭 Linux 测试称为可发布 VPN。Linux 没有 Apple SDK；Network.framework、NetworkExtension、Tun2SocksKit 5.16.0、utun、HEV `udp: 'udp'`、路径 MTU、取消和资源回收都必须在 Xcode 与物理 iPad 验证。
 
 ## Linux 验证
 
@@ -10,7 +12,25 @@ swift test
 swift test -c release
 ```
 
-`IPadProxyCore` 只导入 Foundation，并以 Swift 6 strict concurrency 编译。`PacketTunnelTemplate/**` 导入 Network、Security 和 NetworkExtension，不参与 Linux target。
+`IPadProxyCore` 只导入 Foundation，并以 Swift 6 strict concurrency 编译。Linux 无 Apple SDK，因此 `App/**`、`PacketTunnelTemplate/**` 和 `PacketTunnelExtension/**` 不参与 SwiftPM typecheck；本地验证仅能对这些文件执行 `swiftc -parse` 语法检查。
+
+## App 与工程骨架
+
+- `project.yml` 定义 iOS 15、Swift 6 的 `IPadProxy` App target 和 `PacketTunnelExtension` target；两者使用本地 `IPadProxyCore` package，只有 Extension 依赖 Tun2SocksKit 5.16.0，App 嵌入 Extension。
+- 占位 bundle IDs 是 `com.example.ipadproxy` 与 `com.example.ipadproxy.PacketTunnel`。App Group 是 `group.com.example.ipadproxy`；两个 target 使用同一 App Group 和共享 Keychain group。实际构建前必须在 Apple Developer 账户中建立匹配的 identifiers、capabilities 和 provisioning。
+- App 使用 `NavigationView`/`Form` 显示 VPN 状态，编辑 relay endpoint、DIRECT/PROXY DNS literal，在 SecureField 接收 64 位 hex token，导入 JSON rules，并安装、连接或断开同一个 `NETunnelProviderManager` profile。
+- token 只写入共享 Keychain，不写入 UserDefaults、App Group JSON 或 `NETunnelProviderProtocol.providerConfiguration`。App Group 只保存严格 Codable 的 relay/规则文件配置。
+- 规则导入对 security-scoped URL 成对调用 start/stop，最多读取 32 MiB；`RuleStore` 先验证和编译，再原子替换共享规则文件。失败保留旧文件。
+- Extension principal class `PacketTunnelEntry` 严格装配共享配置、规则 snapshot、Keychain token、受管 flow、两个 action 固定的 DNS resolver、`DNSProxyService`、loopback SOCKS TCP/UDP bridge 和 HEV adapter；任何缺项在安装 settings 前 fail closed。
+
+在安装了 XcodeGen 和完整 Xcode/iOS SDK 的 macOS 上生成工程：
+
+```sh
+cd ios
+xcodegen generate
+```
+
+生成工程不等于 VPN 可用。仍需配置开发团队、真实 capabilities/provisioning，并在物理 iPad 上完成 extension、App Group、共享 Keychain 和 packet stack 验证。
 
 ## 已实现
 
@@ -62,7 +82,7 @@ swift test -c release
 ### 受管 flow 与有界资源
 
 - `ManagedFlowCoordinator.openTCP/openUDP` 先取得 opening permit，再原子分类并取得可选 Fake IP lease，恢复 domain 与原 port 后调用 `FlowRouter`，最后 activate permit。未知 pool 内 Fake IP 明确 fail closed；open、route 或 activate 失败会关闭已打开的底层 flow，并按 lease、permit 顺序释放资源。
-- `ManagedTCPByteStream` 与 `ManagedUDPAssociation` 是 actor wrapper。`close()` 先幂等关闭底层，再释放 Fake IP lease 和 limiter permit；receive EOF 自动执行相同 cleanup。底层 TCP send/receive/finishSending 或 UDP send/receive 抛错时，wrapper 等待同一 cleanup 完成后原样重抛。TCP `finishSending()` 成功时只做 write-side half-close，不释放 flow ownership。
+- `ManagedTCPByteStream` 与 `ManagedUDPAssociation` 是 actor wrapper。`close()` 先幂等关闭底层，再释放 Fake IP lease 和 limiter permit。TCP remote EOF 只标记 read finished，仍允许 client→remote send；`finishSending()` 成功后禁止继续 send。读写两边都结束后自动 cleanup。显式 close 或底层 TCP send/receive/finishSending、UDP send/receive 错误仍立即 full cleanup。
 - `ManagedFlowRegistry` 强持有所有已打开 wrapper，暴露 active/high-water snapshot，并由 coordinator 提供 `closeAll()`。wrapper cleanup 完成后注销并打破 registry retain cycle；并发 `closeAll()`、单 flow close、EOF 和 I/O error 都等待同一个 cleanup task，只关闭底层和释放 permit/lease 一次。registry 因此可以在 owner 遗忘 `close()` 时由 tunnel stop 统一回收。
 - `BoundedByteQueue<Element>` 通过 `@Sendable` size closure 同时限制 item 数和 byte 数，等待消费者数也受 item 上限约束，不会形成无界 continuation 列表。admission 不等待；FIFO dequeue 可取消；`finish()` 保留并排空已接收元素后返回 `nil`，`cancel()` 丢弃缓存并以 typed error 唤醒等待者。metrics 包含 current、high-water、accepted、dequeued 和 rejected 指标。
 - `FlowLimiter` 默认限制 active flow 1024、opening flow 128、active UDP flow 256。只有 limiter 能创建 `FlowPermit`；opening 到 active 的转换、失败释放、外部 permit 和重复释放都由 actor 内 identity/state 校验。snapshot 暴露 current、high-water 和 rejection 指标。
@@ -78,18 +98,17 @@ swift test -c release
 
 ## Xcode 接入步骤
 
-1. 在 containing app 的 Xcode 工程中将 `ios/` 作为 local Swift Package，引入 `IPadProxyCore`。
-2. 创建 Packet Tunnel Extension target，加入 NetworkExtension、Network 和 Security。
-3. 将 `PacketTunnelTemplate/*.swift` 加入 extension target；将 Keychain 配置界面和同一 access group 加入 containing app target。
-4. 配置 NetworkExtension entitlement、App ID、extension provisioning、Info.plist provider class、App Group 和 Keychain access group。
-5. 提供经过审查的 lwIP adapter 或同类 user-space TCP/IP stack，实现 `PacketStackAdapter`。adapter 必须为每个 flow 创建独立 task，提供有限 buffer、取消、deadline、TCP half-close 与 UDP idle expiry。
-6. override `PacketTunnelProvider.makeDependencies()`，创建启动时的 `RuleStore` snapshot、`FakeIPStore`、`DNSProxyCore`、DIRECT `TunnelTransport`、`NetworkFrameworkTLSTransport`、`FlowRouter` 和 packet-stack adapter。缺少任何依赖时模板 fail closed。
-7. provider 先安装 IPv4/IPv6 route 与 DNS network settings，再允许 adapter 开始 `packetFlow` reads；停止时 adapter 必须取消 packet reads、全部 flow、TLS 操作和 timers。
-8. 使用 `AppGroupConfigurationStore` 传递 relay hostname/port 与 rules filename，使用 `KeychainCredentialStore` 传递 token。不要把 token 放进 provider configuration 或日志。
+1. 在 macOS 安装 XcodeGen，并从 `ios/` 运行 `xcodegen generate`。
+2. 在 Apple Developer 账户中把占位 bundle IDs、App Group 和 Keychain group 替换为团队实际值，并配置两个 target 的签名与 provisioning。
+3. 生成并编译工程，确认 App 能安装/更新唯一的 `NETunnelProviderManager` profile，且 App/Extension 能访问同一 App Group 与 Keychain item。
+4. 验证缺少 App Group、provider.json、rules、Info.plist Keychain 字段或 token 时会在安装 settings 前 fail closed；不要移除这些检查，也不要加入 DIRECT fallback。
+5. 验证 Tun2SocksKit 5.16.0 package resolution/checksum、Apple target typecheck/link 和 HEV 对当前 iOS/Xcode 的 utun 获取。
+6. 在物理 iPad 验证 TCP/UDP IPv4/IPv6、half-close、DNS UDP/TCP、UDP idle expiry、立即启动失败、运行期 completion、quit/join、重复 stop、网络切换和内存上限。
 
 ## 测试覆盖
 
-- `ManagedFlowCoordinator` 覆盖普通 DIRECT/PROXY、Fake IP domain/port 恢复、未知 Fake IP fail closed、backend/activate 失败回滚、EOF、TCP/UDP I/O error cleanup、TCP half-close、registry active/high-water、遗忘 owner、并发 `closeAll`/单 flow close/EOF、lease/permit 归零和并发 active cap。
+- SOCKS5 codec 覆盖 greeting/NO AUTH、CONNECT、UDP ASSOCIATE unspecified endpoint、三种 UDP target exact bytes、reply exact bytes、reply `0.0.0.0:0`、BIND/未知 command 的 REP `0x07`、空 UDP payload、FRAG/RSV/ATYP、zero port、截断、65,507 边界与 oversize。
+- `ManagedFlowCoordinator` 覆盖普通 DIRECT/PROXY、Fake IP domain/port 恢复、未知 Fake IP fail closed、backend/activate 失败回滚、remote 先 FIN 后继续 send 再 finish、write 先 finish 后 remote EOF、TCP/UDP I/O error cleanup、registry active/high-water、遗忘 owner、并发 `closeAll`/close/EOF/finish、lease/permit 释放时机和并发 active cap。
 - `DNSProxyService` 覆盖 DIRECT/PROXY resolver 隔离、错误与 timeout 无 fallback、A/AAAA 本地合成、HTTPS 转发、UDP TC 同 action TCP retry、TCP repeated TC 与 TCP 入口 TC 拒绝、TCP framing、response ID/QR/opcode/question/malformed 验证、重试响应复验、配置校验、无真实等待的可控 timeout、resolver cancellation、inflight cap、不调用 resolver 的超限拒绝、成功/失败/超时 permit 归还和 REJECT 本地响应。
 - 原有 protocol golden frames、边界、strict decode 与 secret redaction。
 - Fake IP 规范化、固定 TTL、correlation grace、lease pin/release、quarantine、ABA/重复 release、续订、耗尽和并发。
@@ -103,10 +122,10 @@ swift test -c release
 
 ## 尚未验证或未包含
 
-- Apple 模板尚未接入 `ManagedFlowCoordinator` 与 `DNSProxyService`，也未在 Xcode、iOS SDK 或真机编译。本环境只验证 SwiftPM/Linux core；Network.framework 和 NetworkExtension API 仍需在实际工程中通过编译与签名。
-- DNS upstream resolver 目前是 core protocol 边界；生产 DIRECT/PROXY resolver adapter、连接池和 DNSSEC policy 仍需由 Packet Tunnel runtime 提供。生产 resolver 必须遵守 cancellation 契约，service 负责每次调用的 timeout 与查询级 inflight cap。service 不缓存真实 DNS response，也不改写 PROXY A/AAAA 的 Fake-IP 合成模式。
-- 受管 wrapper 没有也不能依赖 async `deinit`。正常主动放弃仍应显式 close；tunnel stop 必须调用 coordinator `closeAll()`，以回收 registry 强持有的遗忘 flow。
-- 仓库没有 lwIP dependency/adapter、containing app、extension target、Info.plist、entitlements 或 UI，因此不能声称端到端 Packet Tunnel 已运行。DIRECT Network.framework backend 已提供模板，但尚未经过 Xcode/真机验证。
-- 尚未真机验证 MTU、IPv4/IPv6 全流量 route、DNS recovery、TCP half-close、UDP idle expiry、休眠唤醒、网络切换、内存压力和 stop cancellation。
+- Apple 模板已将 `ManagedFlowCoordinator`、`DNSProxyService`、SOCKS5 UDP relay 与 Fake DNS TCP/UDP interception 接入 Packet Tunnel composition root；本环境没有 Apple SDK，只完成 SwiftPM/Linux core 测试与 Apple 文件语法解析，尚未 typecheck/link。
+- DIRECT/PROXY DNS resolver 每次查询独立 open/send/receive/close，TCP 使用精确两字节 DNS framing；当前不实现连接池或额外 DNSSEC policy，且任何错误都不会切换 action。
+- 受管 wrapper 没有也不能依赖 async `deinit`。正常主动放弃仍应显式 close；bridge/adapter stop 调用 coordinator `closeAll()`，回收 registry 强持有的遗忘 flow。
+- 仓库已有 Tun2SocksKit dependency、HEV adapter 和 TCP bridge，但 Tun2SocksKit 没有可靠 positive-ready API，且尚未经过 Apple typecheck/link 和真机 utun 验证，因此不能声称端到端 Packet Tunnel 可用。
+- 尚未真机验证 MTU、TCP/UDP IPv4/IPv6、TCP half-close、DNS UDP/TCP、UDP idle expiry、休眠唤醒、网络切换、内存压力和 stop cancellation。
 - v1 只支持 TLS over TCP，不实现或宣称 QUIC。
 - 不实现指纹仿冒、主动探测规避、MITM、自定义密码学或 TLS trust 绕过。

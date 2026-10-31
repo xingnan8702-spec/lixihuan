@@ -30,7 +30,7 @@ public struct IPAddress: Equatable, Sendable, CustomStringConvertible {
         self.bytes = bytes
     }
 
-    var rawBytes: [UInt8] { bytes }
+    public var rawBytes: [UInt8] { bytes }
 
     public var description: String {
         switch family {

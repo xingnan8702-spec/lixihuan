@@ -49,9 +49,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     @MainActor private var packetStack: (any PacketStackAdapter)?
 
     @MainActor
-    func makeDependencies() throws -> PacketTunnelDependencies {
-        // Construct RuleStore snapshot, FakeIPStore, DNSProxyCore, DIRECT backend,
-        // NetworkFrameworkTLSTransport, FlowRouter, and reviewed packet stack here.
+    func makeDependencies() async throws -> PacketTunnelDependencies {
+        // A containing extension must assemble and validate every runtime dependency.
         throw IntegrationError.missingDependencies
     }
 
@@ -86,7 +85,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             var localStack: (any PacketStackAdapter)?
             do {
-                let dependencies = try makeDependencies()
+                try Task.checkCancellation()
+                let dependencies = try await makeDependencies()
+                try Task.checkCancellation()
                 localStack = dependencies.packetStack
                 guard generation == currentGeneration, state == .starting else {
                     throw CancellationError()
@@ -184,9 +185,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    /// Conservative settings matching the core Fake IP defaults.
+    /// Conservative settings matching the core Fake IP defaults. Fake DNS is
+    /// advertised only when a DNS packet service is actually installed.
     @MainActor
-    static func defaultNetworkSettings(remoteAddress: String) -> NEPacketTunnelNetworkSettings {
+    static func defaultNetworkSettings(
+        remoteAddress: String,
+        installFakeDNS: Bool
+    ) -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: remoteAddress)
         let ipv4 = NEIPv4Settings(addresses: ["198.18.0.1"], subnetMasks: ["255.254.0.0"])
         ipv4.includedRoutes = [NEIPv4Route.default()]
@@ -196,9 +201,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         ipv6.includedRoutes = [NEIPv6Route.default()]
         settings.ipv6Settings = ipv6
 
-        let dns = NEDNSSettings(servers: ["198.18.0.2", "fd00:198:18:2::2"])
-        dns.matchDomains = [""]
-        settings.dnsSettings = dns
+        if installFakeDNS {
+            let dns = NEDNSSettings(servers: ["198.18.0.2", "fd00:198:18:2::2"])
+            dns.matchDomains = [""]
+            settings.dnsSettings = dns
+        }
         settings.mtu = 1_280
         return settings
     }
