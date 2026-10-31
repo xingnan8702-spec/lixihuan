@@ -266,7 +266,7 @@ final class AppViewModel: ObservableObject {
             while !Task.isCancelled {
                 await self?.refreshDiagnosticsOnce(reset: false, reportFailure: false)
                 do {
-                    try await Task.sleep(for: .seconds(2))
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
                 } catch {
                     return
                 }

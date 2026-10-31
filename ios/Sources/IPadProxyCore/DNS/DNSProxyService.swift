@@ -24,7 +24,11 @@ public struct SystemDNSUpstreamSleeper: DNSUpstreamSleeper {
     public init() {}
 
     public func sleep(for interval: TimeInterval) async throws {
-        try await Task.sleep(for: .seconds(interval))
+        guard interval.isFinite, interval > 0 else {
+            throw DNSProxyServiceError.invalidConfiguration
+        }
+        let value = min(interval * 1_000_000_000, Double(UInt64.max))
+        try await Task.sleep(nanoseconds: UInt64(value))
     }
 }
 
