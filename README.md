@@ -28,6 +28,12 @@ QUIC is intentionally deferred until Apple Network.framework interoperability ca
 - `deploy`: service and configuration examples
 - `docs`: architecture, security, testing, and roadmap
 
+## v0.2.2 status
+
+The `feature/ipad-proxy-v0.2.2-local` branch adds managed TCP/UDP flow ownership, a registry-backed `closeAll()`, fail-closed Fake IP restoration, and an action-preserving DNS upstream service with response validation, timeout, inflight limits, and same-route TCP retry. Swift debug and release suites contain 101 passing tests.
+
+The branch name retains its local-development suffix for history, but this version is now ready for review through GitHub.
+
 ## v0.2.1 status
 
 The Go relay and local SOCKS5 client are runnable and covered by local TCP/UDP end-to-end tests. The relay now bounds total sessions, concurrent handshakes, UDP associations, and contacted UDP peers. The Swift core adds Fake IP flow leases with grace/quarantine, bounded byte queues, flow permits, and a platform-independent tunnel lifecycle controller.

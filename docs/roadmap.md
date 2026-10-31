@@ -31,6 +31,17 @@
 - Joined UDP shutdown and aggregate server metrics
 - Shared Go/Swift protocol-v1 golden fixtures
 
+## v0.2.2: managed flow and DNS core, ready for review
+
+- Managed flow ownership across permit, Fake IP lease, transport, EOF, error, and close
+- Registry-backed `closeAll()` for tunnel shutdown
+- Fail-closed classification of unknown addresses inside Fake IP pools
+- Action-preserving DIRECT/PROXY DNS upstream service
+- Upstream response binding validation, timeout, inflight cap, and same-action TCP retry
+- 101 passing Swift tests in debug and release
+
+This version is published on its review branch. The Apple Packet Tunnel still needs a real user-space stack and adapters.
+
 ## v0.3: high-performance UDP
 
 - Swift Network.framework to Go QUIC interoperability spike

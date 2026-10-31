@@ -21,7 +21,7 @@ public enum FakeIPStoreError: Error, Equatable, Sendable {
 /// A capability proving that a flow acquired a particular Fake IP mapping.
 ///
 /// Callers can inspect the normalized domain and address, but only
-/// `FakeIPStore.acquireLease(for:)` can construct a lease. Release the lease
+/// `FakeIPStore` can construct a lease. Release the lease
 /// when the flow finishes. Copies are safe: repeated releases are idempotent.
 public struct FakeIPLease: Sendable {
     public let normalizedDomain: String
@@ -47,6 +47,14 @@ public struct FakeIPLease: Sendable {
         self.entryIdentity = entryIdentity
         self.leaseIdentity = leaseIdentity
     }
+}
+
+public enum FakeIPLeaseAcquisition: Sendable {
+    /// The address is outside both configured Fake IP pools.
+    case notManaged
+    /// The address belongs to a Fake IP pool but has no leasable mapping.
+    case unknownManagedAddress
+    case acquired(FakeIPLease)
 }
 
 /// A bounded, dual-stack Fake IP allocator.
@@ -278,8 +286,8 @@ public actor FakeIPStore {
     }
 
     /// Diagnostic reverse lookup only. This method does not hold the mapping or
-    /// extend its TTL. Production flow setup must use `acquireLease(for:)` and
-    /// retain the returned lease until the flow closes.
+    /// extend its TTL. Production flow setup must use `acquireLease(forFlow:)`
+    /// and retain the returned lease until the flow closes.
     public func domain(for address: IPAddress) async -> String? {
         let now = await clock.now()
         removeExpired(at: now)
@@ -288,27 +296,43 @@ public actor FakeIPStore {
         return key.domain
     }
 
-    /// Atomically reverse-resolves an address and pins that exact mapping.
-    /// Acquisition is allowed through the correlation grace interval, but not
-    /// at or after its deadline.
-    public func acquireLease(for address: IPAddress) async -> FakeIPLease? {
+    /// Atomically classifies an address, reverse-resolves it, and pins the exact
+    /// mapping when it belongs to a configured Fake IP pool. Pool addresses
+    /// without a live mapping are distinguished from ordinary Internet targets
+    /// so callers can fail closed.
+    public func acquireLease(forFlow address: IPAddress) async -> FakeIPLeaseAcquisition {
         let now = await clock.now()
         removeExpired(at: now)
         let addressKey = AddressKey(family: address.family, bytes: address.rawBytes)
-        guard let key = reverse[addressKey], var entry = entries[key] else { return nil }
+        guard isInManagedPool(address) else { return .notManaged }
+        guard let key = reverse[addressKey], var entry = entries[key] else {
+            return .unknownManagedAddress
+        }
         let graceDeadline = deadline(after: configuration.correlationGrace, from: entry.expiresAt)
-        guard now < graceDeadline else { return nil }
+        guard now < graceDeadline else { return .unknownManagedAddress }
 
         let leaseIdentity = UUID()
         entry.leaseIdentities.insert(leaseIdentity)
         entries[key] = entry
-        return FakeIPLease(
+        return .acquired(FakeIPLease(
             domain: key.domain,
             address: entry.address,
             storeIdentity: storeIdentity,
             entryIdentity: entry.identity,
             leaseIdentity: leaseIdentity
-        )
+        ))
+    }
+
+    /// Atomically reverse-resolves an address and pins that exact mapping.
+    /// Acquisition is allowed through the correlation grace interval, but not
+    /// at or after its deadline. This compatibility API returns nil both for an
+    /// ordinary address and for an unknown address in a managed pool; flow setup
+    /// should use `acquireLease(forFlow:)` to preserve fail-closed behavior.
+    public func acquireLease(for address: IPAddress) async -> FakeIPLease? {
+        guard case let .acquired(lease) = await acquireLease(forFlow: address) else {
+            return nil
+        }
+        return lease
     }
 
     /// Releases a lease once. Foreign, stale, copied, or already released
@@ -339,6 +363,27 @@ public actor FakeIPStore {
     public var quarantineCount: Int { quarantined.count }
     public var activeLeaseCount: Int {
         entries.values.reduce(0) { $0 + $1.leaseIdentities.count }
+    }
+
+    private func isInManagedPool(_ address: IPAddress) -> Bool {
+        let network: [UInt8]
+        let prefixLength: Int
+        switch address.family {
+        case .ipv4:
+            network = configuration.ipv4Network
+            prefixLength = configuration.ipv4PrefixLength
+        case .ipv6:
+            network = configuration.ipv6Network
+            prefixLength = configuration.ipv6PrefixLength
+        }
+
+        return address.rawBytes.enumerated().allSatisfy { index, byte in
+            let remaining = prefixLength - index * 8
+            if remaining >= 8 { return byte == network[index] }
+            if remaining <= 0 { return true }
+            let mask = UInt8.max << UInt8(8 - remaining)
+            return byte & mask == network[index] & mask
+        }
     }
 
     private func count(for family: IPAddressFamily) -> Int {
