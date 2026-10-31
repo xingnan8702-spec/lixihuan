@@ -18,6 +18,37 @@ public enum FakeIPStoreError: Error, Equatable, Sendable {
     case unsupportedAddressFamily
 }
 
+/// A capability proving that a flow acquired a particular Fake IP mapping.
+///
+/// Callers can inspect the normalized domain and address, but only
+/// `FakeIPStore.acquireLease(for:)` can construct a lease. Release the lease
+/// when the flow finishes. Copies are safe: repeated releases are idempotent.
+public struct FakeIPLease: Sendable {
+    public let normalizedDomain: String
+    public var domain: String { normalizedDomain }
+    public let address: IPAddress
+    public let family: IPAddressFamily
+
+    fileprivate let storeIdentity: UUID
+    fileprivate let entryIdentity: UUID
+    fileprivate let leaseIdentity: UUID
+
+    fileprivate init(
+        domain: String,
+        address: IPAddress,
+        storeIdentity: UUID,
+        entryIdentity: UUID,
+        leaseIdentity: UUID
+    ) {
+        self.normalizedDomain = domain
+        self.address = address
+        family = address.family
+        self.storeIdentity = storeIdentity
+        self.entryIdentity = entryIdentity
+        self.leaseIdentity = leaseIdentity
+    }
+}
+
 /// A bounded, dual-stack Fake IP allocator.
 ///
 /// The default IPv4 pool is 198.18.0.0/15. The default IPv6 pool is
@@ -34,6 +65,8 @@ public actor FakeIPStore {
         public let ipv6Network: [UInt8]
         public let ipv6PrefixLength: Int
         public let ttl: TimeInterval
+        public let correlationGrace: TimeInterval
+        public let reuseQuarantine: TimeInterval
         public let capacityPerFamily: Int
 
         public init(
@@ -42,6 +75,8 @@ public actor FakeIPStore {
             ipv6Network: [UInt8] = Self.defaultIPv6Network,
             ipv6PrefixLength: Int = 64,
             ttl: TimeInterval = 300,
+            correlationGrace: TimeInterval = 60,
+            reuseQuarantine: TimeInterval = 60,
             capacityPerFamily: Int = 4_096
         ) throws {
             guard ipv4Network.count == 4,
@@ -49,6 +84,8 @@ public actor FakeIPStore {
                   ipv6Network.count == 16,
                   (1...64).contains(ipv6PrefixLength),
                   ttl.isFinite, ttl > 0,
+                  correlationGrace.isFinite, correlationGrace >= 0,
+                  reuseQuarantine.isFinite, reuseQuarantine >= 0,
                   capacityPerFamily > 0
             else { throw FakeIPStoreError.invalidConfiguration }
 
@@ -57,6 +94,8 @@ public actor FakeIPStore {
             self.ipv6Network = Self.mask(ipv6Network, prefixLength: ipv6PrefixLength)
             self.ipv6PrefixLength = ipv6PrefixLength
             self.ttl = ttl
+            self.correlationGrace = correlationGrace
+            self.reuseQuarantine = reuseQuarantine
             self.capacityPerFamily = capacityPerFamily
         }
 
@@ -81,22 +120,39 @@ public actor FakeIPStore {
     }
 
     private struct Entry: Sendable {
+        let identity: UUID
         let address: IPAddress
         var expiresAt: TimeInterval
-        var generation: UInt64
+        var expiryEventIdentity: UUID
+        var leaseIdentities: Set<UUID>
     }
 
-    private struct HeapItem: Sendable {
+    private struct ExpiryItem: Sendable {
         let value: TimeInterval
-        let generation: UInt64
+        let sequence: UInt64
+        let eventIdentity: UUID
         let key: MappingKey
+    }
+
+    private struct QuarantineRecord: Sendable {
+        let releaseAt: TimeInterval
+        let eventIdentity: UUID
+    }
+
+    private struct QuarantineItem: Sendable {
+        let value: TimeInterval
+        let sequence: UInt64
+        let eventIdentity: UUID
+        let address: AddressKey
     }
 
     private struct PoolState: Sendable {
         let network: [UInt8]
         let prefixLength: Int
         var nextHost: UInt64 = 3
+        var exhaustedSequentialRange = false
         var recycled: [[UInt8]] = []
+        var recycledSet: Set<[UInt8]> = []
 
         var maximumHost: UInt64 {
             let hostBits = network.count * 8 - prefixLength
@@ -104,21 +160,34 @@ public actor FakeIPStore {
         }
 
         mutating func allocate(family: IPAddressFamily) -> [UInt8]? {
-            if let address = recycled.popLast() { return address }
-            while nextHost <= maximumHost {
-                let host = nextHost
-                if nextHost == UInt64.max {
-                    nextHost = UInt64.max
-                } else {
-                    nextHost += 1
-                }
-                if family == .ipv4, host == maximumHost { return nil }
-                return address(host: host)
+            if let address = recycled.popLast() {
+                recycledSet.remove(address)
+                return address
             }
-            return nil
+            guard !exhaustedSequentialRange else { return nil }
+
+            let host = nextHost
+            if family == .ipv4, host >= maximumHost {
+                exhaustedSequentialRange = true
+                return nil
+            }
+            guard host <= maximumHost else {
+                exhaustedSequentialRange = true
+                return nil
+            }
+
+            if host == UInt64.max {
+                // The /64 IPv6 pool contains this host exactly once. A separate
+                // exhaustion bit prevents UInt64.max from being returned forever.
+                exhaustedSequentialRange = true
+            } else {
+                nextHost = host + 1
+            }
+            return address(host: host)
         }
 
         mutating func recycle(_ bytes: [UInt8]) {
+            guard recycledSet.insert(bytes).inserted else { return }
             recycled.append(bytes)
         }
 
@@ -134,10 +203,13 @@ public actor FakeIPStore {
 
     private let configuration: Configuration
     private let clock: any FakeIPClock
+    private let storeIdentity = UUID()
     private var entries: [MappingKey: Entry] = [:]
     private var reverse: [AddressKey: MappingKey] = [:]
-    private var expiryHeap: [HeapItem] = []
-    private var generation: UInt64 = 0
+    private var quarantined: [AddressKey: QuarantineRecord] = [:]
+    private var expiryHeap: [ExpiryItem] = []
+    private var quarantineHeap: [QuarantineItem] = []
+    private var heapSequence: UInt64 = 0
     private var familyCounts: [IPAddressFamily: Int] = [.ipv4: 0, .ipv6: 0]
     private var ipv4Pool: PoolState
     private var ipv6Pool: PoolState
@@ -152,20 +224,23 @@ public actor FakeIPStore {
         ipv6Pool = PoolState(network: configuration.ipv6Network, prefixLength: configuration.ipv6PrefixLength)
     }
 
+    /// Allocates or renews a mapping for a DNS answer.
+    ///
+    /// A repeated DNS query renews the same address for one new fixed TTL while
+    /// that mapping still exists. Diagnostic lookup and lease acquisition do
+    /// not renew the TTL.
     public func address(for domain: String, family: IPAddressFamily) async throws -> IPAddress {
         let normalized = try DomainNormalizer.normalizeRuleDomain(domain)
         let now = await clock.now()
         removeExpired(at: now)
         let key = MappingKey(domain: normalized, family: family)
         if var existing = entries[key] {
-            touch(&existing, key: key)
+            scheduleExpiry(for: &existing, key: key, expiresAt: deadline(after: configuration.ttl, from: now))
             entries[key] = existing
             return existing.address
         }
 
         guard count(for: family) < configuration.capacityPerFamily else {
-            // Never evict a live mapping: a flow may still be using its Fake IP.
-            // Expired mappings were removed above; callers can retry after expiry.
             throw FakeIPStoreError.poolExhausted(family)
         }
 
@@ -178,17 +253,23 @@ public actor FakeIPStore {
         }
         guard let bytes else { throw FakeIPStoreError.poolExhausted(family) }
 
-        generation &+= 1
         let address = IPAddress.validated(family: family, bytes: bytes)
-        let entry = Entry(address: address, expiresAt: now + configuration.ttl, generation: generation)
+        var entry = Entry(
+            identity: UUID(),
+            address: address,
+            expiresAt: 0,
+            expiryEventIdentity: UUID(),
+            leaseIdentities: []
+        )
+        scheduleExpiry(for: &entry, key: key, expiresAt: deadline(after: configuration.ttl, from: now))
         entries[key] = entry
         familyCounts[family, default: 0] += 1
         reverse[AddressKey(family: family, bytes: bytes)] = key
-        push(HeapItem(value: entry.expiresAt, generation: generation, key: key), into: &expiryHeap)
-        compactHeapIfNeeded()
+        compactHeapsIfNeeded()
         return address
     }
 
+    /// Returns a current mapping without renewing its authoritative DNS TTL.
     public func existingAddress(for domain: String, family: IPAddressFamily) async throws -> IPAddress? {
         let normalized = try DomainNormalizer.normalizeRuleDomain(domain)
         let now = await clock.now()
@@ -196,14 +277,58 @@ public actor FakeIPStore {
         return entries[MappingKey(domain: normalized, family: family)]?.address
     }
 
+    /// Diagnostic reverse lookup only. This method does not hold the mapping or
+    /// extend its TTL. Production flow setup must use `acquireLease(for:)` and
+    /// retain the returned lease until the flow closes.
     public func domain(for address: IPAddress) async -> String? {
         let now = await clock.now()
         removeExpired(at: now)
         let addressKey = AddressKey(family: address.family, bytes: address.rawBytes)
-        guard let key = reverse[addressKey], var entry = entries[key] else { return nil }
-        touch(&entry, key: key)
-        entries[key] = entry
+        guard let key = reverse[addressKey], entries[key] != nil else { return nil }
         return key.domain
+    }
+
+    /// Atomically reverse-resolves an address and pins that exact mapping.
+    /// Acquisition is allowed through the correlation grace interval, but not
+    /// at or after its deadline.
+    public func acquireLease(for address: IPAddress) async -> FakeIPLease? {
+        let now = await clock.now()
+        removeExpired(at: now)
+        let addressKey = AddressKey(family: address.family, bytes: address.rawBytes)
+        guard let key = reverse[addressKey], var entry = entries[key] else { return nil }
+        let graceDeadline = deadline(after: configuration.correlationGrace, from: entry.expiresAt)
+        guard now < graceDeadline else { return nil }
+
+        let leaseIdentity = UUID()
+        entry.leaseIdentities.insert(leaseIdentity)
+        entries[key] = entry
+        return FakeIPLease(
+            domain: key.domain,
+            address: entry.address,
+            storeIdentity: storeIdentity,
+            entryIdentity: entry.identity,
+            leaseIdentity: leaseIdentity
+        )
+    }
+
+    /// Releases a lease once. Foreign, stale, copied, or already released
+    /// leases have no effect on the current mapping.
+    public func release(_ lease: FakeIPLease) async {
+        guard lease.storeIdentity == storeIdentity else { return }
+        let now = await clock.now()
+        removeExpired(at: now)
+        let key = MappingKey(domain: lease.domain, family: lease.family)
+        guard var entry = entries[key],
+              entry.identity == lease.entryIdentity,
+              entry.address == lease.address,
+              entry.leaseIdentities.remove(lease.leaseIdentity) != nil
+        else { return }
+
+        entries[key] = entry
+        let graceDeadline = deadline(after: configuration.correlationGrace, from: entry.expiresAt)
+        if entry.leaseIdentities.isEmpty, now >= graceDeadline {
+            moveToQuarantine(key, entry: entry, at: now)
+        }
     }
 
     public func removeExpiredMappings() async {
@@ -211,51 +336,134 @@ public actor FakeIPStore {
     }
 
     public var mappingCount: Int { entries.count }
+    public var quarantineCount: Int { quarantined.count }
+    public var activeLeaseCount: Int {
+        entries.values.reduce(0) { $0 + $1.leaseIdentities.count }
+    }
 
     private func count(for family: IPAddressFamily) -> Int {
         familyCounts[family, default: 0]
     }
 
-    private func touch(_ entry: inout Entry, key: MappingKey) {
-        generation &+= 1
-        // Access does not extend DNS TTL. It only refreshes the heap generation
-        // so stale heap records cannot remove a currently referenced entry early.
-        entry.generation = generation
-        push(HeapItem(value: entry.expiresAt, generation: generation, key: key), into: &expiryHeap)
-        compactHeapIfNeeded()
+    private func scheduleExpiry(for entry: inout Entry, key: MappingKey, expiresAt: TimeInterval) {
+        entry.expiresAt = expiresAt
+        entry.expiryEventIdentity = UUID()
+        let graceDeadline = deadline(after: configuration.correlationGrace, from: expiresAt)
+        push(
+            ExpiryItem(
+                value: graceDeadline,
+                sequence: nextHeapSequence(),
+                eventIdentity: entry.expiryEventIdentity,
+                key: key
+            ),
+            into: &expiryHeap,
+            less: expiryLess
+        )
     }
 
     private func removeExpired(at now: TimeInterval) {
+        releaseQuarantinedAddresses(at: now)
         while let first = expiryHeap.first, first.value <= now {
-            _ = pop(from: &expiryHeap)
+            _ = pop(from: &expiryHeap, less: expiryLess)
             guard let entry = entries[first.key],
-                  entry.generation == first.generation,
-                  entry.expiresAt <= now
+                  entry.expiryEventIdentity == first.eventIdentity,
+                  deadline(after: configuration.correlationGrace, from: entry.expiresAt) <= now,
+                  entry.leaseIdentities.isEmpty
             else { continue }
-            remove(first.key, entry: entry)
+            moveToQuarantine(first.key, entry: entry, at: first.value)
         }
+        releaseQuarantinedAddresses(at: now)
+        compactHeapsIfNeeded()
     }
 
-    private func remove(_ key: MappingKey, entry: Entry) {
+    private func moveToQuarantine(_ key: MappingKey, entry: Entry, at now: TimeInterval) {
+        guard entries[key]?.identity == entry.identity else { return }
         entries.removeValue(forKey: key)
         familyCounts[key.family, default: 0] -= 1
-        reverse.removeValue(forKey: AddressKey(family: entry.address.family, bytes: entry.address.rawBytes))
-        switch entry.address.family {
-        case .ipv4: ipv4Pool.recycle(entry.address.rawBytes)
-        case .ipv6: ipv6Pool.recycle(entry.address.rawBytes)
+        let addressKey = AddressKey(family: entry.address.family, bytes: entry.address.rawBytes)
+        reverse.removeValue(forKey: addressKey)
+
+        let eventIdentity = UUID()
+        let releaseAt = deadline(after: configuration.reuseQuarantine, from: now)
+        quarantined[addressKey] = QuarantineRecord(releaseAt: releaseAt, eventIdentity: eventIdentity)
+        push(
+            QuarantineItem(
+                value: releaseAt,
+                sequence: nextHeapSequence(),
+                eventIdentity: eventIdentity,
+                address: addressKey
+            ),
+            into: &quarantineHeap,
+            less: quarantineLess
+        )
+    }
+
+    private func releaseQuarantinedAddresses(at now: TimeInterval) {
+        while let first = quarantineHeap.first, first.value <= now {
+            _ = pop(from: &quarantineHeap, less: quarantineLess)
+            guard let record = quarantined[first.address],
+                  record.eventIdentity == first.eventIdentity,
+                  record.releaseAt <= now
+            else { continue }
+            quarantined.removeValue(forKey: first.address)
+            switch first.address.family {
+            case .ipv4: ipv4Pool.recycle(first.address.bytes)
+            case .ipv6: ipv6Pool.recycle(first.address.bytes)
+            }
         }
     }
 
-    private func compactHeapIfNeeded() {
-        let threshold = entries.count * 4 + 64
-        guard expiryHeap.count > threshold else { return }
-        expiryHeap = entries.map {
-            HeapItem(value: $0.value.expiresAt, generation: $0.value.generation, key: $0.key)
+    private func compactHeapsIfNeeded() {
+        let expiryThreshold = entries.count * 4 + 64
+        if expiryHeap.count > expiryThreshold {
+            expiryHeap = entries.map { key, entry in
+                ExpiryItem(
+                    value: deadline(after: configuration.correlationGrace, from: entry.expiresAt),
+                    sequence: nextHeapSequence(),
+                    eventIdentity: entry.expiryEventIdentity,
+                    key: key
+                )
+            }
+            heapify(&expiryHeap, less: expiryLess)
         }
-        heapify(&expiryHeap)
+
+        let quarantineThreshold = quarantined.count * 4 + 64
+        if quarantineHeap.count > quarantineThreshold {
+            quarantineHeap = quarantined.map { address, record in
+                QuarantineItem(
+                    value: record.releaseAt,
+                    sequence: nextHeapSequence(),
+                    eventIdentity: record.eventIdentity,
+                    address: address
+                )
+            }
+            heapify(&quarantineHeap, less: quarantineLess)
+        }
     }
 
-    private func push(_ item: HeapItem, into heap: inout [HeapItem]) {
+    private func deadline(after interval: TimeInterval, from start: TimeInterval) -> TimeInterval {
+        let value = start + interval
+        return value.isFinite ? value : .greatestFiniteMagnitude
+    }
+
+    private func nextHeapSequence() -> UInt64 {
+        if heapSequence < UInt64.max { heapSequence += 1 }
+        return heapSequence
+    }
+
+    private func expiryLess(_ lhs: ExpiryItem, _ rhs: ExpiryItem) -> Bool {
+        lhs.value == rhs.value ? lhs.sequence < rhs.sequence : lhs.value < rhs.value
+    }
+
+    private func quarantineLess(_ lhs: QuarantineItem, _ rhs: QuarantineItem) -> Bool {
+        lhs.value == rhs.value ? lhs.sequence < rhs.sequence : lhs.value < rhs.value
+    }
+
+    private func push<Item>(
+        _ item: Item,
+        into heap: inout [Item],
+        less: (Item, Item) -> Bool
+    ) {
         heap.append(item)
         var child = heap.count - 1
         while child > 0 {
@@ -266,7 +474,7 @@ public actor FakeIPStore {
         }
     }
 
-    private func pop(from heap: inout [HeapItem]) -> HeapItem? {
+    private func pop<Item>(from heap: inout [Item], less: (Item, Item) -> Bool) -> Item? {
         guard !heap.isEmpty else { return nil }
         if heap.count == 1 { return heap.removeLast() }
         let result = heap[0]
@@ -284,7 +492,7 @@ public actor FakeIPStore {
         return result
     }
 
-    private func heapify(_ heap: inout [HeapItem]) {
+    private func heapify<Item>(_ heap: inout [Item], less: (Item, Item) -> Bool) {
         guard heap.count > 1 else { return }
         for index in stride(from: heap.count / 2 - 1, through: 0, by: -1) {
             var parent = index
@@ -298,10 +506,5 @@ public actor FakeIPStore {
                 parent = child
             }
         }
-    }
-
-    private func less(_ lhs: HeapItem, _ rhs: HeapItem) -> Bool {
-        if lhs.value != rhs.value { return lhs.value < rhs.value }
-        return lhs.generation < rhs.generation
     }
 }

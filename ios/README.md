@@ -1,12 +1,13 @@
-# iOS v0.2 core 与 Packet Tunnel 接入边界
+# iOS v0.2.1 core 与 Packet Tunnel 接入边界
 
-`ios/` 包含一个可在 Linux 测试的 Swift 6 core package，以及不纳入 SwiftPM target 的 Apple Packet Tunnel 接入模板。core 已实现 v0.2 的协议、Fake IP、DNS、规则存储、路由和传输边界；仓库仍不包含可运行 VPN 所需的 reviewed user-space TCP/IP stack、Xcode targets、entitlements 或 provisioning。
+`ios/` 包含一个可在 Linux 测试的 Swift 6 core package，以及不纳入 SwiftPM target 的 Apple Packet Tunnel 接入模板。core 已实现 v0.2.1 的协议、Fake IP lease 生命周期、有界资源原语、生命周期控制、DNS、规则存储、路由和传输边界；仓库仍不包含可运行 VPN 所需的 reviewed user-space TCP/IP stack、Xcode targets、entitlements 或 provisioning。
 
 ## Linux 验证
 
 ```sh
 cd ios
 swift test
+swift test -c release
 ```
 
 `IPadProxyCore` 只导入 Foundation，并以 Swift 6 strict concurrency 编译。`PacketTunnelTemplate/**` 导入 Network、Security 和 NetworkExtension，不参与 Linux target。
@@ -23,11 +24,15 @@ swift test
 
 ### Fake IP
 
-- `FakeIPStore` actor 提供双栈稳定映射、反查、固定权威 TTL、每族容量上限、过期回收、明确池耗尽错误和可注入时间。容量满时不会驱逐仍有效的映射。
+- `FakeIPStore` actor 提供双栈稳定映射、反查、固定权威 TTL、每族容量上限和明确池耗尽错误。`Configuration` 的 `correlationGrace` 与 `reuseQuarantine` 默认各 60 秒，并拒绝负数或非有限值。
+- `acquireLease(for:)` 在一次 actor 操作中完成反查和 lease 计数。`FakeIPLease` 只能由 store 创建，公开规范化域名、地址和地址族；`release(_:)` 验证 store、映射和 lease identity，因此重复 release、迟到 release 和地址复用后的旧 lease 都不会影响新映射。
+- DNS TTL 到期后，在 correlation grace 结束前仍可新建 lease；grace 后不能新建 lease。已有 lease 会保留映射。最后一个 lease 在 grace 后释放时，地址进入 quarantine；quarantine 到期后才回到 pool。
+- 新 DNS 查询只要映射尚未进入 quarantine，就续订同一地址和一段新的固定 TTL。`existingAddress(for:)`、`domain(for:)` 和 `acquireLease(for:)` 都不会滑动 TTL。
+- **`domain(for:)` 仅用于无 lease 的诊断。生产 packet-flow 接入必须调用 `acquireLease(for:)`，并持有 lease 到 TCP/UDP flow 完全关闭；不得用 `domain(for:)` 完成生产 flow 反查。**
 - 默认 IPv4 pool 为 `198.18.0.0/15`。
 - 默认 IPv6 pool 明确定为 `fd00:198:18:2::/64`。这是固定的 ULA，仅用于 Packet Tunnel 虚拟接口和内部 Fake IP，不应发布到外部路由。真实产品若同时运行多个相互连通的 ULA 网络，应配置部署专用的随机 RFC 4193 Global ID，避免固定前缀冲突。
 - 两个 pool 都保留 host ID 0、1、2，分别用于网络、gateway 和 DNS；IPv4 额外保留广播地址。默认 gateway/DNS 是 `198.18.0.1`/`.2` 和 `fd00:198:18:2::1`/`::2`。
-- 分配使用游标和回收栈，不逐次扫描地址池；TTL 最小堆使用惰性失效并作摊销压缩。正向或反向查询不会延长权威 TTL。
+- 分配使用游标和隔离期后的回收栈，不逐次扫描地址池；TTL/grace 与 quarantine 都使用惰性失效最小堆并作摊销压缩。IPv6 `/64` 游标到达 `UInt64.max` 后会明确耗尽，不会重复分配最后一个 host。
 - 域名转小写并移除末尾点；当前不执行 IDNA。
 
 ### DNS
@@ -48,6 +53,13 @@ swift test
 - `RuleStore` actor 从 Data/URL 严格导入，拒绝超过 32 MiB 的输入，先 decode/compile，再持久化，最后切换 active snapshot；任何失败保留旧 generation。
 - Foundation `.atomic` 执行同目录临时写和 rename，完成后尽力同步文件。Foundation-only core 没有跨平台 directory-fsync API。
 - snapshot 暴露 generation、configuration、active `RuleEngine` 和 trust。v0.2 没有签名格式，所有导入明确标记 `localImportOnly`。
+
+### 有界资源与 lifecycle
+
+- `BoundedByteQueue<Element>` 通过 `@Sendable` size closure 同时限制 item 数和 byte 数，等待消费者数也受 item 上限约束，不会形成无界 continuation 列表。admission 不等待；FIFO dequeue 可取消；`finish()` 保留并排空已接收元素后返回 `nil`，`cancel()` 丢弃缓存并以 typed error 唤醒等待者。metrics 包含 current、high-water、accepted、dequeued 和 rejected 指标。
+- `FlowLimiter` 默认限制 active flow 1024、opening flow 128、active UDP flow 256。只有 limiter 能创建 `FlowPermit`；opening 到 active 的转换、失败释放、外部 permit 和重复释放都由 actor 内 identity/state 校验。snapshot 暴露 current、high-water 和 rejection 指标。
+- `TunnelLifecycleController` 是 Foundation-only actor，不依赖 NetworkExtension。它管理 stopped/starting/running/stopping/failed、单调 generation、stop-during-start、启动失败回滚、fatal/stop 共享 cleanup gate 和 cleanup timeout。cleanup 超时或失败会标记 residual resources 并阻止 restart；后续 `stop()` 可重试 cleanup，只有成功后才解除阻止。
+- 这些 core primitive 尚未接入 `PacketTunnelTemplate`，因为模板不属于 SwiftPM target。Apple adapter 接入时必须让每个 flow 持有 Fake IP lease 和 limiter permit，并用 controller 驱动 runtime 的 prepare/activate/quiesce/close。
 
 ### Routing 与 credentials
 
@@ -70,7 +82,10 @@ swift test
 ## 测试覆盖
 
 - 原有 protocol golden frames、边界、strict decode 与 secret redaction。
-- Fake IP 稳定映射、规范化、固定 TTL、不驱逐有效项、回收、耗尽、反查和双栈默认地址。
+- Fake IP 规范化、固定 TTL、correlation grace、lease pin/release、quarantine、ABA/重复 release、续订、耗尽和并发。
+- `BoundedByteQueue` 的 item/byte 双限制、FIFO、指标、finish、cancel 和等待任务取消。
+- `FlowLimiter` 的 opening/active/UDP caps、转换、typed errors、伪造/重复 release 防护和并发上限。
+- lifecycle 的 stop-during-start、重复 stop、启动回滚、fatal cleanup、timeout residual block 和 generation。
 - DNS A/AAAA、DIRECT、REJECT、带路由动作的 HTTPS/SVCB forward、EDNS(0)、非法 compression、malformed input 与 TCP framing。
 - RuleStore atomic persistence、startup load，以及验证/持久化失败保留旧 active generation。
 - FlowRouter 三分支、PROXY 失败不回退，以及有界 transport doubles、half-close 和测试用 credential store。
