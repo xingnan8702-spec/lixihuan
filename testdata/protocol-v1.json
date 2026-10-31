@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "tokenHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "vectors": [
+    {
+      "name": "udp_associate_request",
+      "kind": "request_udp",
+      "wireHex": "00000023010220000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "name": "tcp_connect_domain_request",
+      "kind": "request_tcp_domain",
+      "domain": "example.com",
+      "port": 443,
+      "wireHex": "00000032010120000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f030b6578616d706c652e636f6d01bb"
+    },
+    {
+      "name": "ok_response",
+      "kind": "response_ok",
+      "wireHex": "0000000401000000"
+    },
+    {
+      "name": "forbidden_response",
+      "kind": "response_forbidden",
+      "message": "denied",
+      "wireHex": "0000000a0104000664656e696564"
+    },
+    {
+      "name": "ipv4_datagram",
+      "kind": "datagram_ipv4",
+      "host": "1.1.1.1",
+      "port": 53,
+      "payloadHex": "646e73",
+      "wireHex": "0000000b0101010101010035646e73"
+    },
+    {
+      "name": "ipv6_empty_datagram",
+      "kind": "datagram_ipv6",
+      "host": "2001:db8::1",
+      "port": 443,
+      "payloadHex": "",
+      "wireHex": "00000014010220010db800000000000000000000000101bb"
+    },
+    {
+      "name": "utf8_domain_datagram",
+      "kind": "datagram_domain",
+      "domain": "例子.example",
+      "port": 80,
+      "payloadHex": "ff00",
+      "wireHex": "0000001501030ee4be8be5ad902e6578616d706c650050ff00"
+    }
+  ]
+}

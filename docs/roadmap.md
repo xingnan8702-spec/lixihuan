@@ -11,7 +11,7 @@
 - Swift protocol and rule core
 - Packet Tunnel fail-closed integration template
 
-## v0.2: iPad packet data path
+## v0.2: iPad packet data path, in progress
 
 - Xcode containing app and Packet Tunnel targets
 - Keychain and App Group configuration storage
@@ -21,6 +21,15 @@
 - DNS proxy, Fake IP allocator, TTL cache, A/AAAA and TCP DNS
 - Imported rule package storage and atomic activation
 - Tunnel status and diagnostic UI
+
+## v0.2.1: stability core, delivered
+
+- Fake IP flow lease, correlation grace, and reuse quarantine
+- Bounded item/byte queues and flow admission permits
+- Platform-independent tunnel lifecycle controller
+- Go total-session, handshake, and UDP-association limits
+- Joined UDP shutdown and aggregate server metrics
+- Shared Go/Swift protocol-v1 golden fixtures
 
 ## v0.3: high-performance UDP
 

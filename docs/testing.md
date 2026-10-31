@@ -49,3 +49,15 @@ A future installable build must additionally pass on a physical iPad:
 - Imported China-domain and China-IP rules with signature, rollback, and stale-data behavior
 
 No installable iPad build should be described as stable before these gates pass.
+
+## v0.2.1 stability checks
+
+The v0.2.1 suite additionally verifies:
+
+- Go total-session, handshake, and UDP-association admission limits
+- UDP pump shutdown/join and aggregate metrics
+- Fake IP flow lease, correlation grace, quarantine, ABA-safe release, and concurrency
+- Bounded item/byte queues and waiter cancellation
+- Opening/active/UDP flow permits
+- Tunnel lifecycle rollback, shared cleanup, timeout, and residual-resource blocking
+- Exact Go/Swift compatibility against `testdata/protocol-v1.json`

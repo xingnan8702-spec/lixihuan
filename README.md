@@ -28,9 +28,11 @@ QUIC is intentionally deferred until Apple Network.framework interoperability ca
 - `deploy`: service and configuration examples
 - `docs`: architecture, security, testing, and roadmap
 
-## v0.2 status
+## v0.2.1 status
 
-The Go relay and local SOCKS5 client are runnable and covered by local TCP/UDP end-to-end tests. The Swift core now includes indexed imported rules, bounded dual-stack Fake IP allocation, DNS A/AAAA synthesis, EDNS validation, action-preserving DNS forwarding, atomic local rule activation, fixed-target DIRECT/PROXY transport boundaries, and credential interfaces. Apple-only templates provide Network.framework TLS and DIRECT adapters, Keychain/App Group storage, and a fail-closed Packet Tunnel lifecycle.
+The Go relay and local SOCKS5 client are runnable and covered by local TCP/UDP end-to-end tests. The relay now bounds total sessions, concurrent handshakes, UDP associations, and contacted UDP peers. The Swift core adds Fake IP flow leases with grace/quarantine, bounded byte queues, flow permits, and a platform-independent tunnel lifecycle controller.
+
+Go and Swift both consume `testdata/protocol-v1.json`, so protocol changes must preserve the same exact golden wire bytes in both implementations. Apple-only templates still provide Network.framework TLS and DIRECT adapters, Keychain/App Group storage, and a fail-closed Packet Tunnel bridge.
 
 The Packet Tunnel remains an integration template rather than an installable VPN because the repository does not yet contain a reviewed lwIP adapter, Xcode targets, entitlements, provisioning, or physical-iPad validation. See `docs/v0.2-design.md` and `docs/v0.2-acceptance.md` for the exact boundary.
 
