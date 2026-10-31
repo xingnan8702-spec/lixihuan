@@ -1,0 +1,6 @@
+bin/
+.local/
+*.log
+.DS_Store
+ios/.build/
+ios/.swiftpm/

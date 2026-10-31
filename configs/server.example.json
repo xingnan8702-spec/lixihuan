@@ -1,0 +1,14 @@
+{
+  "listen": "0.0.0.0:8443",
+  "certificate_file": "/etc/ipad-proxy/server.crt",
+  "private_key_file": "/etc/ipad-proxy/server.key",
+  "token_sha256": [
+    "REPLACE_WITH_PROXY_TOKEN_SHA256_OUTPUT"
+  ],
+  "allow_private_destinations": false,
+  "handshake_timeout": "10s",
+  "dial_timeout": "10s",
+  "io_timeout": "5m",
+  "udp_idle_timeout": "2m",
+  "shutdown_timeout": "10s"
+}

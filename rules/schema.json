@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/ipad-proxy/rules-v1.schema.json",
+  "title": "iPad Proxy routing rules v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "rules", "final"],
+  "properties": {
+    "version": { "const": 1 },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "rules": {
+      "type": "array",
+      "maxItems": 500000,
+      "items": { "$ref": "#/$defs/rule" }
+    },
+    "final": { "$ref": "#/$defs/action" }
+  },
+  "$defs": {
+    "action": { "enum": ["DIRECT", "PROXY", "REJECT"] },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value", "action"],
+      "properties": {
+        "type": {
+          "enum": ["domain", "domain_suffix", "domain_keyword", "ip_cidr", "port"]
+        },
+        "value": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "action": { "$ref": "#/$defs/action" }
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "listen": "127.0.0.1:1080",
+  "server_address": "proxy.example.com:8443",
+  "server_name": "proxy.example.com",
+  "root_ca_file": "",
+  "token": "REPLACE_WITH_PROXY_TOKEN_OUTPUT",
+  "handshake_timeout": "10s",
+  "io_timeout": "5m",
+  "udp_idle_timeout": "2m",
+  "shutdown_timeout": "10s"
+}
