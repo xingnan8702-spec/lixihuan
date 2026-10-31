@@ -64,21 +64,30 @@ public actor ManagedFlowCoordinator {
     private let limiter: FlowLimiter
     private let fakeIPStore: FakeIPStore
     private let registry: ManagedFlowRegistry
+    private let diagnostics: TunnelDiagnostics?
 
     public init(
         router: FlowRouter,
         limiter: FlowLimiter,
         fakeIPStore: FakeIPStore,
-        registry: ManagedFlowRegistry = ManagedFlowRegistry()
+        registry: ManagedFlowRegistry = ManagedFlowRegistry(),
+        diagnostics: TunnelDiagnostics? = nil
     ) {
         self.router = router
         self.limiter = limiter
         self.fakeIPStore = fakeIPStore
         self.registry = registry
+        self.diagnostics = diagnostics
     }
 
     public func openTCP(to target: Address) async throws -> ManagedTCPByteStream {
-        let permit = try await limiter.beginOpening(.tcp)
+        let permit: FlowPermit
+        do {
+            permit = try await limiter.beginOpening(.tcp)
+        } catch {
+            await recordOpenFailure(error)
+            throw error
+        }
         var lease: FakeIPLease?
         var openedStream: (any TCPByteStream)?
 
@@ -91,6 +100,7 @@ public actor ManagedFlowCoordinator {
             )
             openedStream = stream
             try await limiter.activate(permit)
+            await diagnostics?.recordFlowActivated(.tcp)
 
             let registrationID = UUID()
             let managed = ManagedTCPByteStream(
@@ -100,7 +110,8 @@ public actor ManagedFlowCoordinator {
                 fakeIPStore: fakeIPStore,
                 limiter: limiter,
                 registry: registry,
-                registrationID: registrationID
+                registrationID: registrationID,
+                diagnostics: diagnostics
             )
             await registry.register(managed, id: registrationID)
             return managed
@@ -108,12 +119,19 @@ public actor ManagedFlowCoordinator {
             if let openedStream { await openedStream.close() }
             if let lease { await fakeIPStore.release(lease) }
             _ = await limiter.release(permit)
+            await recordOpenFailure(error)
             throw error
         }
     }
 
     public func openUDP(to target: Address) async throws -> ManagedUDPAssociation {
-        let permit = try await limiter.beginOpening(.udp)
+        let permit: FlowPermit
+        do {
+            permit = try await limiter.beginOpening(.udp)
+        } catch {
+            await recordOpenFailure(error)
+            throw error
+        }
         var lease: FakeIPLease?
         var openedAssociation: (any UDPDatagramAssociation)?
 
@@ -126,6 +144,7 @@ public actor ManagedFlowCoordinator {
             )
             openedAssociation = association
             try await limiter.activate(permit)
+            await diagnostics?.recordFlowActivated(.udp)
 
             let registrationID = UUID()
             let managed = ManagedUDPAssociation(
@@ -135,7 +154,8 @@ public actor ManagedFlowCoordinator {
                 fakeIPStore: fakeIPStore,
                 limiter: limiter,
                 registry: registry,
-                registrationID: registrationID
+                registrationID: registrationID,
+                diagnostics: diagnostics
             )
             await registry.register(managed, id: registrationID)
             return managed
@@ -143,6 +163,7 @@ public actor ManagedFlowCoordinator {
             if let openedAssociation { await openedAssociation.close() }
             if let lease { await fakeIPStore.release(lease) }
             _ = await limiter.release(permit)
+            await recordOpenFailure(error)
             throw error
         }
     }
@@ -153,6 +174,17 @@ public actor ManagedFlowCoordinator {
 
     public var snapshot: ManagedFlowRegistrySnapshot {
         get async { await registry.snapshot }
+    }
+
+    private func recordOpenFailure(_ error: Error) async {
+        switch error {
+        case is FlowLimiterError:
+            await diagnostics?.recordResourceRejection()
+        case is FlowRouterError, is ManagedFlowCoordinatorError:
+            await diagnostics?.recordRejectedFlow()
+        default:
+            await diagnostics?.recordTransportFailure()
+        }
     }
 
     private struct ResolvedTarget: Sendable {
@@ -202,6 +234,7 @@ public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
     private let limiter: FlowLimiter
     private let registry: ManagedFlowRegistry
     private let registrationID: UUID
+    private let diagnostics: TunnelDiagnostics?
     private var readFinished = false
     private var writeFinished = false
     private var finishTask: Task<Void, Error>?
@@ -214,7 +247,8 @@ public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
         fakeIPStore: FakeIPStore,
         limiter: FlowLimiter,
         registry: ManagedFlowRegistry,
-        registrationID: UUID
+        registrationID: UUID,
+        diagnostics: TunnelDiagnostics?
     ) {
         self.stream = stream
         self.lease = lease
@@ -223,6 +257,7 @@ public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
         self.limiter = limiter
         self.registry = registry
         self.registrationID = registrationID
+        self.diagnostics = diagnostics
     }
 
     public func send(_ bytes: Data) async throws {
@@ -231,8 +266,9 @@ public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
         }
         do {
             try await stream.send(bytes)
+            await diagnostics?.recordTraffic(.upload, bytes: UInt64(bytes.count))
         } catch {
-            await cleanup()
+            await cleanup(transportFailed: true)
             throw error
         }
     }
@@ -242,13 +278,15 @@ public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
         guard !readFinished else { return nil }
         do {
             let bytes = try await stream.receive(maxBytes: maxBytes)
-            if bytes == nil {
+            if let bytes {
+                await diagnostics?.recordTraffic(.download, bytes: UInt64(bytes.count))
+            } else {
                 readFinished = true
                 await cleanupIfBothDirectionsFinished()
             }
             return bytes
         } catch {
-            await cleanup()
+            await cleanup(transportFailed: true)
             throw error
         }
     }
@@ -277,7 +315,7 @@ public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
             await cleanupIfBothDirectionsFinished()
         } catch {
             finishTask = nil
-            await cleanup()
+            await cleanup(transportFailed: true)
             throw error
         }
     }
@@ -292,7 +330,7 @@ public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
         }
     }
 
-    private func cleanup() async {
+    private func cleanup(transportFailed: Bool = false) async {
         if let cleanupTask {
             await cleanupTask.value
             return
@@ -304,11 +342,14 @@ public actor ManagedTCPByteStream: TCPByteStream, ManagedFlowRegistration {
         let permit = permit
         let registry = registry
         let registrationID = registrationID
+        let diagnostics = diagnostics
         let task = Task {
+            if transportFailed { await diagnostics?.recordTransportFailure() }
             await stream.close()
             if let lease { await fakeIPStore.release(lease) }
             _ = await limiter.release(permit)
             await registry.unregister(id: registrationID)
+            await diagnostics?.recordFlowClosed(.tcp)
         }
         cleanupTask = task
         await task.value
@@ -324,6 +365,7 @@ public actor ManagedUDPAssociation: UDPDatagramAssociation, ManagedFlowRegistrat
     private let limiter: FlowLimiter
     private let registry: ManagedFlowRegistry
     private let registrationID: UUID
+    private let diagnostics: TunnelDiagnostics?
     private var isClosed = false
     private var cleanupTask: Task<Void, Never>?
 
@@ -334,7 +376,8 @@ public actor ManagedUDPAssociation: UDPDatagramAssociation, ManagedFlowRegistrat
         fakeIPStore: FakeIPStore,
         limiter: FlowLimiter,
         registry: ManagedFlowRegistry,
-        registrationID: UUID
+        registrationID: UUID,
+        diagnostics: TunnelDiagnostics?
     ) {
         self.association = association
         self.lease = lease
@@ -343,14 +386,16 @@ public actor ManagedUDPAssociation: UDPDatagramAssociation, ManagedFlowRegistrat
         self.limiter = limiter
         self.registry = registry
         self.registrationID = registrationID
+        self.diagnostics = diagnostics
     }
 
     public func send(_ payload: Data) async throws {
         guard !isClosed else { throw TransportError.closed }
         do {
             try await association.send(payload)
+            await diagnostics?.recordTraffic(.upload, bytes: UInt64(payload.count))
         } catch {
-            await cleanup()
+            await cleanup(transportFailed: true)
             throw error
         }
     }
@@ -359,10 +404,14 @@ public actor ManagedUDPAssociation: UDPDatagramAssociation, ManagedFlowRegistrat
         guard !isClosed else { return nil }
         do {
             let payload = try await association.receive()
-            if payload == nil { await cleanup() }
+            if let payload {
+                await diagnostics?.recordTraffic(.download, bytes: UInt64(payload.count))
+            } else {
+                await cleanup()
+            }
             return payload
         } catch {
-            await cleanup()
+            await cleanup(transportFailed: true)
             throw error
         }
     }
@@ -371,7 +420,7 @@ public actor ManagedUDPAssociation: UDPDatagramAssociation, ManagedFlowRegistrat
         await cleanup()
     }
 
-    private func cleanup() async {
+    private func cleanup(transportFailed: Bool = false) async {
         if let cleanupTask {
             await cleanupTask.value
             return
@@ -384,11 +433,14 @@ public actor ManagedUDPAssociation: UDPDatagramAssociation, ManagedFlowRegistrat
         let permit = permit
         let registry = registry
         let registrationID = registrationID
+        let diagnostics = diagnostics
         let task = Task {
+            if transportFailed { await diagnostics?.recordTransportFailure() }
             await association.close()
             if let lease { await fakeIPStore.release(lease) }
             _ = await limiter.release(permit)
             await registry.unregister(id: registrationID)
+            await diagnostics?.recordFlowClosed(.udp)
         }
         cleanupTask = task
         await task.value

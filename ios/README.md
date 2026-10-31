@@ -1,8 +1,8 @@
-# iOS v0.2.5 本地 UDP 与 DNS Packet Tunnel 接线
+# iOS v0.2.6 聚合诊断与 Packet Tunnel IPC
 
-`ios/` 包含可在 Linux 测试的 Swift 6 core、SwiftUI iPad containing app、Packet Tunnel Extension 和 XcodeGen 工程描述。v0.2.5 在 v0.2.4.1 的 TCP 生命周期基础上接入 SOCKS5 UDP ASSOCIATE、本地 UDP relay、双上游 DNS resolver、Fake DNS UDP/TCP interception 和严格 DNS literal 配置。packet stack 仍保持先安装 settings、后启动读取。
+`ios/` 包含可在 Linux 测试的 Swift 6 core、SwiftUI iPad containing app、Packet Tunnel Extension 和 XcodeGen 工程描述。v0.2.6 在 v0.2.5 TCP/UDP/DNS 数据路径上增加隐私保护的聚合诊断、严格且限制为 64 KiB 的 app/extension JSON IPC、前台两秒刷新以及手动刷新/重置。诊断只包含 uptime、TCP/UDP active/high-water、上下行 bytes/packets、DNS total/failures、flow/resource rejection、transport failure 和固定 terminal error category，不包含目标、域名、IP、端口、token、路径、payload 或底层错误描述。
 
-当前代码是本地恢复版本，不应仅凭 Linux 测试称为可发布 VPN。Linux 没有 Apple SDK；Network.framework、NetworkExtension、Tun2SocksKit 5.16.0、utun、HEV `udp: 'udp'`、路径 MTU、取消和资源回收都必须在 Xcode 与物理 iPad 验证。
+当前代码仍不能仅凭 Linux 测试称为可发布 VPN。Linux 没有 Apple SDK；Network.framework、NetworkExtension provider messaging、Tun2SocksKit 5.16.0、utun、路径 MTU、取消和资源回收都必须在 Xcode 与物理 iPad 验证。当前解析到的 Tun2SocksKit 5.16.0 没有稳定 `Socks5Tunnel.stats` API，因此没有猜测或重复合并 HEV packet counter，managed core counter 是权威来源。
 
 ## Linux 验证
 
@@ -33,6 +33,16 @@ xcodegen generate
 生成工程不等于 VPN 可用。仍需配置开发团队、真实 capabilities/provisioning，并在物理 iPad 上完成 extension、App Group、共享 Keychain 和 packet stack 验证。
 
 ## 已实现
+
+### v0.2.6 聚合诊断
+
+- `TunnelDiagnostics` actor 的全部计数采用饱和加法，active 递减不会下溢；reset 保留当前 TCP/UDP active，将 high-water 重置为当前 active，并清空累计值与 terminal error。
+- snapshot、request、response 都是 `Codable`/`Equatable`/`Sendable`；request/response 及嵌套 snapshot 拒绝未知字段，codec 拒绝空、malformed、版本不兼容和超过 64 KiB 的消息。
+- `ManagedFlowCoordinator` 保持原有 initializer 调用兼容，通过可选 diagnostics 记录激活、策略拒绝、资源拒绝和 transport failure。managed TCP/UDP wrapper 只在成功 send/receive 后按 `Data.count` 记录，cleanup gate 确保并发 close/EOF/error 只递减一次 active。
+- `DNSProxyService` 保持原有 initializer 调用兼容。每个 UDP query/TCP frame 计入 total；上游、timeout 和 response validation 失败对该 query 只计一次 failure；本地 REJECT response 不计 transport failure。
+- Extension 强持有 core diagnostics 与 adapter diagnostics source。adapter 以 core 为累计值权威来源，并用 coordinator/limiter live snapshot 校验 active gauge；由于依赖中没有稳定 HEV stats API，不伪造 HEV byte/packet 数据。
+- Provider app-message handler 严格处理 snapshot/reset，任何错误只返回固定错误枚举。App 仅在 connected/reasserting 时发消息，continuation 只完成一次；前台每两秒刷新，后台或断开立即取消，并支持手动刷新/reset。
+- SwiftUI Diagnostics section 仅显示格式化上下行 bytes、active TCP/UDP、DNS failures、两类 rejection 与固定 last error，不显示任何目标信息。
 
 ### Tunnel protocol 与 transport boundary
 

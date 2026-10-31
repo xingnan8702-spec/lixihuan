@@ -17,12 +17,18 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var isBusy = false
     @Published private(set) var rulesStatus = "No rules imported in this session."
     @Published private(set) var errorMessage: String?
+    @Published private(set) var diagnostics: TunnelDiagnosticsSnapshot?
+    @Published private(set) var isDiagnosticsRefreshing = false
+    @Published private(set) var diagnosticsMessage: String?
 
     private let configurationStore: AppGroupConfigurationStore?
     private let credentialStore: KeychainCredentialStore?
     private let ruleImportService: RuleImportService?
     private let tunnelManager: TunnelManager
     private var cancellables: Set<AnyCancellable> = []
+    private var diagnosticsPollingTask: Task<Void, Never>?
+    private var diagnosticsRefreshTask: Task<Void, Never>?
+    private var appIsActive = false
     private var didLoad = false
 
     init() {
@@ -59,7 +65,11 @@ final class AppViewModel: ObservableObject {
         }
 
         tunnelManager.$status
-            .sink { [weak self] status in self?.vpnStatus = status }
+            .sink { [weak self] status in
+                guard let self else { return }
+                self.vpnStatus = status
+                self.updateDiagnosticsPolling()
+            }
             .store(in: &cancellables)
         tunnelManager.$isInstalled
             .sink { [weak self] installed in self?.isInstalled = installed }
@@ -84,6 +94,13 @@ final class AppViewModel: ObservableObject {
     var canImportRules: Bool {
         !isBusy && ruleImportService != nil
     }
+
+    var canRefreshDiagnostics: Bool {
+        !isDiagnosticsRefreshing && [.connected, .reasserting].contains(vpnStatus)
+    }
+
+    var diagnosticsBytesUp: String { Self.formatBytes(diagnostics?.bytesUp ?? 0) }
+    var diagnosticsBytesDown: String { Self.formatBytes(diagnostics?.bytesDown ?? 0) }
 
     func load() {
         guard !didLoad else { return }
@@ -126,6 +143,29 @@ final class AppViewModel: ObservableObject {
         performOperation(failureMessage: "Could not refresh the VPN configuration.") { [self] in
             try await tunnelManager.load()
         }
+    }
+
+    func sceneDidBecomeActive() {
+        appIsActive = true
+        refreshVPNProfile()
+        updateDiagnosticsPolling()
+    }
+
+    func sceneDidEnterBackground() {
+        appIsActive = false
+        diagnosticsPollingTask?.cancel()
+        diagnosticsPollingTask = nil
+        diagnosticsRefreshTask?.cancel()
+        diagnosticsRefreshTask = nil
+        clearSensitiveInput()
+    }
+
+    func refreshDiagnostics() {
+        startDiagnosticsRefresh(reset: false, reportFailure: true)
+    }
+
+    func resetDiagnostics() {
+        startDiagnosticsRefresh(reset: true, reportFailure: true)
     }
 
     func clearSensitiveInput() {
@@ -206,6 +246,71 @@ final class AppViewModel: ObservableObject {
 
     func clearError() {
         errorMessage = nil
+    }
+
+    private func updateDiagnosticsPolling() {
+        let canPoll = appIsActive && [.connected, .reasserting].contains(vpnStatus)
+        guard canPoll else {
+            diagnosticsPollingTask?.cancel()
+            diagnosticsPollingTask = nil
+            diagnosticsRefreshTask?.cancel()
+            diagnosticsRefreshTask = nil
+            if ![.connected, .reasserting].contains(vpnStatus) {
+                diagnostics = nil
+                diagnosticsMessage = nil
+            }
+            return
+        }
+        guard diagnosticsPollingTask == nil else { return }
+        diagnosticsPollingTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                await self?.refreshDiagnosticsOnce(reset: false, reportFailure: false)
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func startDiagnosticsRefresh(reset: Bool, reportFailure: Bool) {
+        guard canRefreshDiagnostics, diagnosticsRefreshTask == nil else { return }
+        diagnosticsRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await refreshDiagnosticsOnce(reset: reset, reportFailure: reportFailure)
+            diagnosticsRefreshTask = nil
+        }
+    }
+
+    private func refreshDiagnosticsOnce(reset: Bool, reportFailure: Bool) async {
+        guard !isDiagnosticsRefreshing,
+              [.connected, .reasserting].contains(vpnStatus)
+        else { return }
+        isDiagnosticsRefreshing = true
+        defer { isDiagnosticsRefreshing = false }
+        do {
+            let latest = reset
+                ? try await tunnelManager.resetDiagnostics()
+                : try await tunnelManager.fetchDiagnostics()
+            try Task.checkCancellation()
+            guard [.connected, .reasserting].contains(vpnStatus) else { return }
+            diagnostics = latest
+            diagnosticsMessage = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            if reportFailure {
+                diagnosticsMessage = "Diagnostics are unavailable."
+            }
+        }
+    }
+
+    private static func formatBytes(_ value: UInt64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB, .useTB]
+        formatter.countStyle = .binary
+        return formatter.string(fromByteCount: Int64(min(value, UInt64(Int64.max))))
     }
 
     private var configurationCandidate: ProviderConfiguration? {

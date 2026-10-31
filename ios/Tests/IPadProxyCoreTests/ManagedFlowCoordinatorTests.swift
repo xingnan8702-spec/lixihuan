@@ -431,6 +431,96 @@ final class ManagedFlowCoordinatorTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(final.active, 0)
     }
 
+    func testDiagnosticsTrackTrafficFlowsFailuresAndIdempotentCleanup() async throws {
+        let diagnostics = TunnelDiagnostics()
+        let transport = RecordingTransport(
+            tcpReceiveValues: [Data([4, 5]), nil],
+            udpReceiveValues: [Data([8, 9, 10]), nil]
+        )
+        let setup = try makeCoordinator(
+            final: .direct,
+            direct: transport,
+            proxy: RecordingTransport(),
+            diagnostics: diagnostics
+        )
+        let tcp = try await setup.coordinator.openTCP(
+            to: Address.domain("diagnostics-tcp.example", port: 443)
+        )
+        let udp = try await setup.coordinator.openUDP(
+            to: Address.domain("diagnostics-udp.example", port: 53)
+        )
+        try await tcp.send(Data([1, 2, 3]))
+        let tcpReceived = try await tcp.receive(maxBytes: 100)
+        XCTAssertEqual(tcpReceived, Data([4, 5]))
+        try await udp.send(Data([6, 7]))
+        let udpReceived = try await udp.receive()
+        XCTAssertEqual(udpReceived, Data([8, 9, 10]))
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await tcp.close() }
+            group.addTask { await tcp.close() }
+            group.addTask { await udp.close() }
+            group.addTask { await udp.close() }
+        }
+        let snapshot = await diagnostics.snapshot
+        XCTAssertEqual(snapshot.activeTCP, 0)
+        XCTAssertEqual(snapshot.highWaterTCP, 1)
+        XCTAssertEqual(snapshot.activeUDP, 0)
+        XCTAssertEqual(snapshot.highWaterUDP, 1)
+        XCTAssertEqual(snapshot.bytesUp, 5)
+        XCTAssertEqual(snapshot.bytesDown, 5)
+        XCTAssertEqual(snapshot.packetsUp, 2)
+        XCTAssertEqual(snapshot.packetsDown, 2)
+    }
+
+    func testDiagnosticsClassifyPolicyResourceAndTransportOpenFailures() async throws {
+        let diagnostics = TunnelDiagnostics()
+        let rejected = try makeCoordinator(
+            final: .reject,
+            direct: RecordingTransport(),
+            proxy: RecordingTransport(),
+            diagnostics: diagnostics
+        )
+        _ = try? await rejected.coordinator.openTCP(
+            to: Address.domain("rejected.example", port: 443)
+        )
+
+        let failed = try makeCoordinator(
+            final: .direct,
+            direct: RecordingTransport(.fail),
+            proxy: RecordingTransport(),
+            diagnostics: diagnostics
+        )
+        _ = try? await failed.coordinator.openUDP(
+            to: Address.domain("failed.example", port: 53)
+        )
+
+        let limiter = FlowLimiter(configuration: try .init(
+            maximumActive: 1,
+            maximumOpening: 2,
+            maximumUDP: 1
+        ))
+        let limited = try makeCoordinator(
+            final: .direct,
+            direct: RecordingTransport(),
+            proxy: RecordingTransport(),
+            limiter: limiter,
+            diagnostics: diagnostics
+        )
+        let first = try await limited.coordinator.openTCP(
+            to: Address.domain("first.example", port: 443)
+        )
+        _ = try? await limited.coordinator.openTCP(
+            to: Address.domain("limited.example", port: 443)
+        )
+        await first.close()
+
+        let snapshot = await diagnostics.snapshot
+        XCTAssertEqual(snapshot.rejectedFlows, 1)
+        XCTAssertEqual(snapshot.resourceRejections, 1)
+        XCTAssertEqual(snapshot.transportFailures, 1)
+    }
+
     private typealias Setup = (
         coordinator: ManagedFlowCoordinator,
         limiter: FlowLimiter,
@@ -443,12 +533,18 @@ final class ManagedFlowCoordinatorTests: XCTestCase, @unchecked Sendable {
         direct: RecordingTransport,
         proxy: RecordingTransport,
         limiter: FlowLimiter = FlowLimiter(),
-        store: FakeIPStore = FakeIPStore()
+        store: FakeIPStore = FakeIPStore(),
+        diagnostics: TunnelDiagnostics? = nil
     ) throws -> Setup {
         let engine = try RuleEngine(configuration: RoutingConfiguration(rules: rules, final: final))
         let router = FlowRouter(engine: engine, directTransport: direct, proxyTransport: proxy)
         return (
-            ManagedFlowCoordinator(router: router, limiter: limiter, fakeIPStore: store),
+            ManagedFlowCoordinator(
+                router: router,
+                limiter: limiter,
+                fakeIPStore: store,
+                diagnostics: diagnostics
+            ),
             limiter,
             store
         )

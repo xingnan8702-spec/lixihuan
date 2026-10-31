@@ -1,5 +1,6 @@
 #if canImport(NetworkExtension)
 import Foundation
+import IPadProxyCore
 import NetworkExtension
 
 /// Adapter boundary for a reviewed user-space TCP/IP stack. `start` may begin reading
@@ -15,6 +16,8 @@ protocol PacketStackAdapter: AnyObject {
 struct PacketTunnelDependencies {
     let packetStack: any PacketStackAdapter
     let networkSettings: NEPacketTunnelNetworkSettings
+    let diagnostics: TunnelDiagnostics
+    let diagnosticsSource: any TunnelDiagnosticsSource
 }
 
 /// Fail-closed lifecycle template. A containing extension must override
@@ -47,6 +50,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     @MainActor private var startTask: Task<Void, Never>?
     @MainActor private var stopTask: Task<Void, Never>?
     @MainActor private var packetStack: (any PacketStackAdapter)?
+    @MainActor private var diagnostics: TunnelDiagnostics?
+    @MainActor private var diagnosticsSource: (any TunnelDiagnosticsSource)?
 
     @MainActor
     func makeDependencies() async throws -> PacketTunnelDependencies {
@@ -93,9 +98,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     throw CancellationError()
                 }
                 packetStack = dependencies.packetStack
+                diagnostics = dependencies.diagnostics
+                diagnosticsSource = dependencies.diagnosticsSource
+                await dependencies.diagnostics.recordTunnelStarted()
 
                 // No packet read may begin before these settings are active.
-                try await install(dependencies.networkSettings)
+                do {
+                    try await install(dependencies.networkSettings)
+                } catch {
+                    await dependencies.diagnostics.recordTerminalError(.networkSettings)
+                    throw error
+                }
                 try Task.checkCancellation()
                 guard generation == currentGeneration, state == .starting else {
                     throw CancellationError()
@@ -112,6 +125,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 completion.call(nil)
             } catch {
                 if let localStack { await localStack.stop() }
+                if !(error is CancellationError), let diagnostics {
+                    let current = await diagnostics.snapshot
+                    if current.lastTerminalErrorCategory == nil {
+                        await diagnostics.recordTerminalError(.providerStartup)
+                    }
+                }
                 if generation == currentGeneration {
                     packetStack = nil
                     startTask = nil
@@ -162,6 +181,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             if let pendingStart { await pendingStart.value }
             if let stack = packetStack { await stack.stop() }
+            await diagnostics?.recordTunnelStopped()
 
             if generation == currentGeneration {
                 packetStack = nil
@@ -183,6 +203,46 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 else { continuation.resume() }
             }
         }
+    }
+
+    override func handleAppMessage(
+        _ messageData: Data,
+        completionHandler: ((Data?) -> Void)? = nil
+    ) {
+        let completion = OptionalDataCompletionOnce(completionHandler)
+        Task { @MainActor [weak self] in
+            guard let self else {
+                completion.call(Self.encodeProviderResponse(.failure(.unavailable)))
+                return
+            }
+            let response: TunnelDiagnosticsResponse
+            do {
+                let request = try TunnelDiagnosticsMessageCodec.decodeRequest(messageData)
+                guard let source = diagnosticsSource else {
+                    response = .failure(.unavailable)
+                    completion.call(Self.encodeProviderResponse(response))
+                    return
+                }
+                switch request.operation {
+                case .snapshot:
+                    response = .success(await source.diagnosticsSnapshot())
+                case .reset:
+                    response = .success(await source.resetDiagnostics())
+                }
+            } catch TunnelDiagnosticsCodecError.messageTooLarge {
+                response = .failure(.messageTooLarge)
+            } catch TunnelDiagnosticsCodecError.unsupportedVersion {
+                response = .failure(.unsupportedVersion)
+            } catch {
+                response = .failure(.invalidRequest)
+            }
+            completion.call(Self.encodeProviderResponse(response))
+        }
+    }
+
+    private static func encodeProviderResponse(_ response: TunnelDiagnosticsResponse) -> Data {
+        (try? TunnelDiagnosticsMessageCodec.encodeResponse(response))
+            ?? Data(#"{"error":"encodingFailure","version":1}"#.utf8)
     }
 
     /// Conservative settings matching the core Fake IP defaults. Fake DNS is
@@ -208,6 +268,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         settings.mtu = 1_280
         return settings
+    }
+}
+
+private final class OptionalDataCompletionOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completion: ((Data?) -> Void)?
+
+    init(_ completion: ((Data?) -> Void)?) { self.completion = completion }
+
+    func call(_ data: Data?) {
+        lock.lock()
+        let value = completion
+        completion = nil
+        lock.unlock()
+        value?(data)
     }
 }
 

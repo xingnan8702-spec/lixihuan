@@ -28,6 +28,14 @@ QUIC is intentionally deferred until Apple Network.framework interoperability ca
 - `deploy`: service and configuration examples
 - `docs`: architecture, security, testing, and roadmap
 
+## v0.2.6 aggregate diagnostics
+
+v0.2.6 adds a privacy-preserving diagnostics actor and a strict, 64 KiB-bounded app/extension JSON message contract for snapshot and reset. Metrics contain only aggregate uptime, active/high-water TCP and UDP flows, directional byte/packet totals, DNS totals/failures, flow/resource rejections, transport failures, and a fixed terminal-error category. Managed TCP/UDP wrappers account successful `Data` transfers and idempotent cleanup; DNS accounts every query and each failed query once without treating local REJECT responses as transport failures.
+
+The Packet Tunnel extension retains the diagnostics source and answers bounded provider messages. The app requests snapshots only while connected or reasserting, refreshes every two seconds while foreground-active, cancels work when backgrounded or disconnected, and offers manual refresh/reset. The UI does not display destinations. Tun2SocksKit 5.16.0 does not expose a stable `Socks5Tunnel.stats` API in the resolved package, so v0.2.6 does not invent or merge HEV packet counters; managed-core counters remain authoritative.
+
+Swift core debug/release tests and syntax/config parsing are local evidence only. Apple IPC, NetworkExtension callback behavior, Xcode strict-concurrency typechecking/linking, and the complete data path still require Xcode and a physical iPad. See `docs/v0.2.6-status.md`.
+
 ## v0.2.5 local UDP and DNS integration
 
 The local v0.2.5 recovery adds strict SOCKS5 UDP ASSOCIATE and UDP datagram codecs, a loopback UDP relay with 256 fixed-target sessions and 60-second idle expiry, action-preserving DIRECT/PROXY DNS upstream adapters, Fake DNS UDP/TCP interception, and separate literal-IP DNS settings (`223.5.5.5` for DIRECT and `1.1.1.1` for PROXY by default). Legacy v0.2.4.1 provider JSON receives only those two defaults; unknown fields still fail closed.

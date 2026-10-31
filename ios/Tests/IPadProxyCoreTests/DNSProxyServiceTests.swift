@@ -365,13 +365,43 @@ final class DNSProxyServiceTests: XCTestCase, @unchecked Sendable {
         await XCTAssertEqualAsync(await proxy.callCount(), 0)
     }
 
+    func testDiagnosticsCountEachQueryAndFailureOnceWithoutTreatingLocalRejectAsTransport() async throws {
+        let diagnostics = TunnelDiagnostics()
+        let rejectService = try makeService(
+            final: .reject,
+            direct: ScriptedDNSResolver([]),
+            proxy: ScriptedDNSResolver([]),
+            diagnostics: diagnostics
+        )
+        _ = try await rejectService.handleUDPQuery(
+            dnsQuery(name: "local-reject.example", type: 65)
+        )
+
+        let failureService = try makeService(
+            final: .direct,
+            direct: ScriptedDNSResolver([.failure(.resolverFailed)]),
+            proxy: ScriptedDNSResolver([]),
+            diagnostics: diagnostics
+        )
+        _ = try? await failureService.handleUDPQuery(
+            dnsQuery(name: "upstream-failure.example", type: 65)
+        )
+        _ = try? await failureService.handleUDPQuery(Data([0, 1]))
+
+        let snapshot = await diagnostics.snapshot
+        XCTAssertEqual(snapshot.dnsTotal, 3)
+        XCTAssertEqual(snapshot.dnsFailures, 2)
+        XCTAssertEqual(snapshot.transportFailures, 1)
+    }
+
     private func makeService(
         rules: [RoutingRule] = [],
         final: RoutingAction,
         direct: any DNSUpstreamResolver,
         proxy: any DNSUpstreamResolver,
         configuration: DNSProxyService.Configuration = try! .init(),
-        sleeper: any DNSUpstreamSleeper = SystemDNSUpstreamSleeper()
+        sleeper: any DNSUpstreamSleeper = SystemDNSUpstreamSleeper(),
+        diagnostics: TunnelDiagnostics? = nil
     ) throws -> DNSProxyService {
         let engine = try RuleEngine(configuration: RoutingConfiguration(rules: rules, final: final))
         let core = DNSProxyCore(ruleEngine: engine, fakeIPStore: FakeIPStore())
@@ -380,7 +410,8 @@ final class DNSProxyServiceTests: XCTestCase, @unchecked Sendable {
             directResolver: direct,
             proxyResolver: proxy,
             configuration: configuration,
-            sleeper: sleeper
+            sleeper: sleeper,
+            diagnostics: diagnostics
         )
     }
 

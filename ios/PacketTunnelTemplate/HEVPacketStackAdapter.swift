@@ -16,7 +16,7 @@ public enum HEVPacketStackAdapterError: Error, Equatable, Sendable {
 /// forwards UDP through the loopback SOCKS5 UDP relay. DNS is intercepted at
 /// the configured Fake DNS addresses before managed target routing.
 @MainActor
-public final class HEVPacketStackAdapter: PacketStackAdapter {
+public final class HEVPacketStackAdapter: PacketStackAdapter, TunnelDiagnosticsSource {
     public typealias FatalErrorHandler = @MainActor @Sendable (HEVPacketStackAdapterError) -> Void
     public static let exitWaitTimeoutNanoseconds: UInt64 = 5_000_000_000
 
@@ -30,6 +30,7 @@ public final class HEVPacketStackAdapter: PacketStackAdapter {
 
     private let bridge: LocalSOCKS5TCPBridge
     private let coordinator: ManagedFlowCoordinator
+    private let diagnostics: TunnelDiagnostics
     private let fatalErrorHandler: FatalErrorHandler
 
     // Strong ownership for the complete generation. Do not reduce these to local
@@ -50,6 +51,7 @@ public final class HEVPacketStackAdapter: PacketStackAdapter {
     public init(
         bridge: LocalSOCKS5TCPBridge,
         coordinator: ManagedFlowCoordinator,
+        diagnostics: TunnelDiagnostics,
         ruleStore: RuleStore,
         fakeIPStore: FakeIPStore,
         limiter: FlowLimiter,
@@ -60,6 +62,7 @@ public final class HEVPacketStackAdapter: PacketStackAdapter {
     ) {
         self.bridge = bridge
         self.coordinator = coordinator
+        self.diagnostics = diagnostics
         self.ruleStore = ruleStore
         self.fakeIPStore = fakeIPStore
         self.limiter = limiter
@@ -79,6 +82,8 @@ public final class HEVPacketStackAdapter: PacketStackAdapter {
         do {
             port = try await bridge.start()
         } catch {
+            await diagnostics.recordTransportFailure()
+            await diagnostics.recordTerminalError(.bridge)
             if case let .starting(activeGeneration) = state, activeGeneration == generation {
                 state = .stopped
             }
@@ -95,6 +100,8 @@ public final class HEVPacketStackAdapter: PacketStackAdapter {
         }
         guard port != 0 else {
             await bridge.stop()
+            await diagnostics.recordTransportFailure()
+            await diagnostics.recordTerminalError(.bridge)
             state = .stopped
             throw HEVPacketStackAdapterError.invalidSOCKSPort
         }
@@ -118,6 +125,8 @@ public final class HEVPacketStackAdapter: PacketStackAdapter {
             await coordinator.closeAll()
             let error = HEVPacketStackAdapterError.immediateExit(code)
             terminalError = error
+            await diagnostics.recordTransportFailure()
+            await diagnostics.recordTerminalError(.hevImmediateExit)
             state = .stopped
             exitGate = nil
             throw error
@@ -175,8 +184,50 @@ public final class HEVPacketStackAdapter: PacketStackAdapter {
         if timedOut {
             let error = HEVPacketStackAdapterError.exitWaitTimedOut
             terminalError = error
+            await diagnostics.recordTransportFailure()
+            await diagnostics.recordTerminalError(.hevStopTimeout)
             reportFatalError(error)
         }
+    }
+
+    /// Combines the event-owned core snapshot with live coordinator/limiter
+    /// gauges. Core counters remain authoritative, so reset cannot resurrect
+    /// lifetime limiter totals or double-count managed-flow events.
+    public func diagnosticsSnapshot() async -> TunnelDiagnosticsSnapshot {
+        let core = await diagnostics.snapshot
+        let managed = await coordinator.snapshot
+        let limits = await limiter.snapshot
+        let liveTotal = max(0, min(managed.active, limits.active))
+        let liveUDP = max(0, min(limits.activeUDP, liveTotal))
+        let liveTCP = max(0, liveTotal - liveUDP)
+        let activeTCP = max(core.activeTCP, UInt64(liveTCP))
+        let activeUDP = max(core.activeUDP, UInt64(liveUDP))
+
+        // Tun2SocksKit 5.16.0 exposes no stable Socks5Tunnel statistics API.
+        // HEV counters are therefore not guessed or merged into core counters.
+        return TunnelDiagnosticsSnapshot(
+            timestamp: core.timestamp,
+            uptime: core.uptime,
+            activeTCP: activeTCP,
+            highWaterTCP: max(core.highWaterTCP, activeTCP),
+            activeUDP: activeUDP,
+            highWaterUDP: max(core.highWaterUDP, activeUDP),
+            bytesUp: core.bytesUp,
+            bytesDown: core.bytesDown,
+            packetsUp: core.packetsUp,
+            packetsDown: core.packetsDown,
+            dnsTotal: core.dnsTotal,
+            dnsFailures: core.dnsFailures,
+            rejectedFlows: core.rejectedFlows,
+            resourceRejections: core.resourceRejections,
+            transportFailures: core.transportFailures,
+            lastTerminalErrorCategory: core.lastTerminalErrorCategory
+        )
+    }
+
+    public func resetDiagnostics() async -> TunnelDiagnosticsSnapshot {
+        _ = await diagnostics.resetDiagnostics()
+        return await diagnosticsSnapshot()
     }
 
     private func handleCompletion(code: Int32, generation: UUID) async {
@@ -192,6 +243,8 @@ public final class HEVPacketStackAdapter: PacketStackAdapter {
             state = .stopped
             let error = HEVPacketStackAdapterError.unexpectedRuntimeExit(code)
             terminalError = error
+            await diagnostics.recordTransportFailure()
+            await diagnostics.recordTerminalError(.hevRuntimeExit)
             reportFatalError(error)
         case .stopping, .idle, .stopped, .starting, .running:
             // Completion caused by a normal stop is expected and never fatal.

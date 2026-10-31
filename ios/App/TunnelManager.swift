@@ -40,6 +40,9 @@ final class TunnelManager: ObservableObject {
 
     enum ManagerError: Error {
         case profileUnavailable
+        case diagnosticsUnavailable
+        case invalidDiagnosticsResponse
+        case diagnosticsProviderError(TunnelDiagnosticsResponseError)
     }
 
     @Published private(set) var status: Status = .invalid
@@ -118,6 +121,46 @@ final class TunnelManager: ObservableObject {
     func stop() {
         manager?.connection.stopVPNTunnel()
         refreshStatus()
+    }
+
+    func fetchDiagnostics(
+        operation: TunnelDiagnosticsOperation = .snapshot
+    ) async throws -> TunnelDiagnosticsSnapshot {
+        guard let manager,
+              [.connected, .reasserting].contains(Status(manager.connection.status)),
+              let session = manager.connection as? NETunnelProviderSession
+        else { throw ManagerError.diagnosticsUnavailable }
+
+        let request = try TunnelDiagnosticsMessageCodec.encodeRequest(
+            TunnelDiagnosticsRequest(operation: operation)
+        )
+        let responseData: Data = try await withCheckedThrowingContinuation { continuation in
+            let once = ContinuationOnce(continuation)
+            do {
+                try session.sendProviderMessage(request) { data in
+                    guard let data else {
+                        once.resume(throwing: ManagerError.invalidDiagnosticsResponse)
+                        return
+                    }
+                    once.resume(returning: data)
+                }
+            } catch {
+                once.resume(throwing: ManagerError.diagnosticsUnavailable)
+            }
+        }
+        let response: TunnelDiagnosticsResponse
+        do {
+            response = try TunnelDiagnosticsMessageCodec.decodeResponse(responseData)
+        } catch {
+            throw ManagerError.invalidDiagnosticsResponse
+        }
+        if let snapshot = response.snapshot { return snapshot }
+        if let error = response.error { throw ManagerError.diagnosticsProviderError(error) }
+        throw ManagerError.invalidDiagnosticsResponse
+    }
+
+    func resetDiagnostics() async throws -> TunnelDiagnosticsSnapshot {
+        try await fetchDiagnostics(operation: .reset)
     }
 
     private func refreshStatus() {

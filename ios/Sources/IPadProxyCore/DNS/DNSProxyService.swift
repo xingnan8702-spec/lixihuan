@@ -76,6 +76,7 @@ public actor DNSProxyService {
     private let proxyResolver: any DNSUpstreamResolver
     private let configuration: Configuration
     private let sleeper: any DNSUpstreamSleeper
+    private let diagnostics: TunnelDiagnostics?
     private var inflight = 0
     private var highWaterInflight = 0
     private var rejectedInflight: UInt64 = 0
@@ -85,79 +86,97 @@ public actor DNSProxyService {
         directResolver: any DNSUpstreamResolver,
         proxyResolver: any DNSUpstreamResolver,
         configuration: Configuration = try! Configuration(),
-        sleeper: any DNSUpstreamSleeper = SystemDNSUpstreamSleeper()
+        sleeper: any DNSUpstreamSleeper = SystemDNSUpstreamSleeper(),
+        diagnostics: TunnelDiagnostics? = nil
     ) {
         self.core = core
         self.directResolver = directResolver
         self.proxyResolver = proxyResolver
         self.configuration = configuration
         self.sleeper = sleeper
+        self.diagnostics = diagnostics
     }
 
     public func handleUDPQuery(_ query: Data) async throws -> Data {
-        switch try await core.handleQuery(query) {
-        case let .respond(response):
-            return response
-        case let .forward(forwardedQuery, action):
-            let resolver = try resolver(for: action)
-            try acquireInflightPermit()
-            do {
-                let udpResponse = try await resolve(
-                    forwardedQuery,
-                    using: resolver,
-                    transport: .udp
-                )
-                let isTruncated = try DNSProxyCore.validateUpstreamResponse(
-                    udpResponse,
-                    for: forwardedQuery
-                )
-                guard isTruncated else {
-                    releaseInflightPermit()
-                    return udpResponse
-                }
+        await diagnostics?.recordDNSQuery()
+        var forwarding = false
+        do {
+            switch try await core.handleQuery(query) {
+            case let .respond(response):
+                return response
+            case let .forward(forwardedQuery, action):
+                let resolver = try resolver(for: action)
+                try acquireInflightPermit()
+                forwarding = true
+                do {
+                    let udpResponse = try await resolve(
+                        forwardedQuery,
+                        using: resolver,
+                        transport: .udp
+                    )
+                    let isTruncated = try DNSProxyCore.validateUpstreamResponse(
+                        udpResponse,
+                        for: forwardedQuery
+                    )
+                    guard isTruncated else {
+                        releaseInflightPermit()
+                        return udpResponse
+                    }
 
-                let tcpResponse = try await resolve(
-                    forwardedQuery,
-                    using: resolver,
-                    transport: .tcp
-                )
-                let tcpIsTruncated = try DNSProxyCore.validateUpstreamResponse(
-                    tcpResponse,
-                    for: forwardedQuery
-                )
-                guard !tcpIsTruncated else {
-                    throw DNSProxyServiceError.truncatedTCPResponse
+                    let tcpResponse = try await resolve(
+                        forwardedQuery,
+                        using: resolver,
+                        transport: .tcp
+                    )
+                    let tcpIsTruncated = try DNSProxyCore.validateUpstreamResponse(
+                        tcpResponse,
+                        for: forwardedQuery
+                    )
+                    guard !tcpIsTruncated else {
+                        throw DNSProxyServiceError.truncatedTCPResponse
+                    }
+                    releaseInflightPermit()
+                    return tcpResponse
+                } catch {
+                    releaseInflightPermit()
+                    throw error
                 }
-                releaseInflightPermit()
-                return tcpResponse
-            } catch {
-                releaseInflightPermit()
-                throw error
             }
+        } catch {
+            await recordFailure(error, forwarding: forwarding)
+            throw error
         }
     }
 
     public func handleTCPFrame(_ frame: Data) async throws -> Data {
-        switch try await core.handleTCPFrame(frame) {
-        case let .respond(responseFrame):
-            return responseFrame
-        case let .forward(forwardedFrame, action):
-            let query = try DNSProxyCore.decodeTCPFrame(forwardedFrame)
-            let resolver = try resolver(for: action)
-            try acquireInflightPermit()
-            do {
-                let response = try await resolve(query, using: resolver, transport: .tcp)
-                let isTruncated = try DNSProxyCore.validateUpstreamResponse(response, for: query)
-                guard !isTruncated else {
-                    throw DNSProxyServiceError.truncatedTCPResponse
+        await diagnostics?.recordDNSQuery()
+        var forwarding = false
+        do {
+            switch try await core.handleTCPFrame(frame) {
+            case let .respond(responseFrame):
+                return responseFrame
+            case let .forward(forwardedFrame, action):
+                let query = try DNSProxyCore.decodeTCPFrame(forwardedFrame)
+                let resolver = try resolver(for: action)
+                try acquireInflightPermit()
+                forwarding = true
+                do {
+                    let response = try await resolve(query, using: resolver, transport: .tcp)
+                    let isTruncated = try DNSProxyCore.validateUpstreamResponse(response, for: query)
+                    guard !isTruncated else {
+                        throw DNSProxyServiceError.truncatedTCPResponse
+                    }
+                    let frame = try DNSProxyCore.encodeTCPFrame(response)
+                    releaseInflightPermit()
+                    return frame
+                } catch {
+                    releaseInflightPermit()
+                    throw error
                 }
-                let frame = try DNSProxyCore.encodeTCPFrame(response)
-                releaseInflightPermit()
-                return frame
-            } catch {
-                releaseInflightPermit()
-                throw error
             }
+        } catch {
+            await recordFailure(error, forwarding: forwarding)
+            throw error
         }
     }
 
@@ -167,6 +186,15 @@ public actor DNSProxyService {
             highWaterInflight: highWaterInflight,
             rejectedInflight: rejectedInflight
         )
+    }
+
+    private func recordFailure(_ error: Error, forwarding: Bool) async {
+        await diagnostics?.recordDNSFailure()
+        if error as? DNSProxyServiceError == .maximumInflightReached {
+            await diagnostics?.recordResourceRejection()
+        } else if forwarding {
+            await diagnostics?.recordTransportFailure()
+        }
     }
 
     private func resolver(for action: RoutingAction) throws -> any DNSUpstreamResolver {

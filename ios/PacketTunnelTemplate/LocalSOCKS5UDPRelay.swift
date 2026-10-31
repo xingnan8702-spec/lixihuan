@@ -82,6 +82,7 @@ public final class LocalSOCKS5UDPRelay {
 
     private let coordinator: ManagedFlowCoordinator
     private let dnsService: DNSProxyService
+    private let diagnostics: TunnelDiagnostics?
     private let fatalErrorHandler: FatalErrorHandler
     private let queue = DispatchQueue(label: "ipad-proxy.local-socks5-udp")
     private var state: State = .idle
@@ -100,30 +101,39 @@ public final class LocalSOCKS5UDPRelay {
     public init(
         coordinator: ManagedFlowCoordinator,
         dnsService: DNSProxyService,
+        diagnostics: TunnelDiagnostics? = nil,
         fatalErrorHandler: @escaping FatalErrorHandler
     ) {
         self.coordinator = coordinator
         self.dnsService = dnsService
+        self.diagnostics = diagnostics
         self.fatalErrorHandler = fatalErrorHandler
     }
 
     /// Creates one control-owned association while reusing one loopback listener.
     public func beginAssociation(requestedClient: Address) async throws -> ControlAssociation {
         guard Self.isValidControlEndpoint(requestedClient) else {
+            await diagnostics?.recordRejectedFlow()
             throw LocalSOCKS5UDPRelayError.invalidControlEndpoint
         }
         let isWildcard = requestedClient.port == 0
         if isWildcard {
             guard !hasPendingWildcardControl,
                   !controls.values.contains(where: { $0.requestedClient.port == 0 })
-            else { throw LocalSOCKS5UDPRelayError.invalidState }
+            else {
+                await diagnostics?.recordResourceRejection()
+                throw LocalSOCKS5UDPRelayError.invalidState
+            }
             hasPendingWildcardControl = true
         } else {
             guard !pendingControlPorts.contains(requestedClient.port),
                   !controls.values.contains(where: {
                       $0.requestedClient.port == requestedClient.port
                   })
-            else { throw LocalSOCKS5UDPRelayError.invalidState }
+            else {
+                await diagnostics?.recordResourceRejection()
+                throw LocalSOCKS5UDPRelayError.invalidState
+            }
             pendingControlPorts.insert(requestedClient.port)
         }
         do {
@@ -295,10 +305,17 @@ public final class LocalSOCKS5UDPRelay {
     }
 
     private func accept(_ connection: NWConnection) {
-        guard case .ready = state,
-              peers.count < Self.maximumPeers,
-              let controlID = matchingControl(for: connection.endpoint)
-        else {
+        guard case .ready = state else {
+            connection.cancel()
+            return
+        }
+        guard peers.count < Self.maximumPeers else {
+            Task { await diagnostics?.recordResourceRejection() }
+            connection.cancel()
+            return
+        }
+        guard let controlID = matchingControl(for: connection.endpoint) else {
+            Task { await diagnostics?.recordRejectedFlow() }
             connection.cancel()
             return
         }
@@ -326,6 +343,7 @@ public final class LocalSOCKS5UDPRelay {
             while !Task.isCancelled {
                 guard let packet = try await receiveDatagram(from: connection) else { break }
                 guard let datagram = try? SOCKS5UDPDatagramCodec.decode(packet) else {
+                    await diagnostics?.recordRejectedFlow()
                     continue
                 }
                 touchPeer(id)
@@ -352,7 +370,10 @@ public final class LocalSOCKS5UDPRelay {
                 } else {
                     guard sessions.count + pendingTargetSessions.count < Self.maximumTargetSessions,
                           pendingTargetSessions.insert(key).inserted
-                    else { continue }
+                    else {
+                        await diagnostics?.recordResourceRejection()
+                        continue
+                    }
                     do {
                         association = try await coordinator.openUDP(to: datagram.target)
                     } catch {
@@ -390,6 +411,9 @@ public final class LocalSOCKS5UDPRelay {
                 }
             }
         } catch {
+            if !Task.isCancelled {
+                await diagnostics?.recordTransportFailure()
+            }
             // Peer errors are intentionally not logged because endpoint data is sensitive.
         }
     }

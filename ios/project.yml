@@ -30,7 +30,7 @@ targets:
         PRODUCT_NAME: IPadProxy
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
-        MARKETING_VERSION: "0.2.5"
+        MARKETING_VERSION: "0.2.6"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "2"
         GENERATE_INFOPLIST_FILE: NO
@@ -59,7 +59,7 @@ targets:
         PRODUCT_NAME: PacketTunnelExtension
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
-        MARKETING_VERSION: "0.2.5"
+        MARKETING_VERSION: "0.2.6"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "2"
         GENERATE_INFOPLIST_FILE: NO

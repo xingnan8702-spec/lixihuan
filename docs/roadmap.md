@@ -60,6 +60,17 @@ This version is published on its review branch. The Apple Packet Tunnel still ne
 - HEV UDP mode and fail-closed Packet Tunnel composition
 - Swift core tests complete; Xcode typecheck and physical-iPad validation remain release gates
 
+## v0.2.6: aggregate diagnostics and provider IPC, locally verified
+
+- Saturating aggregate diagnostics for TCP/UDP activity, traffic, DNS, rejections, transport failures, and fixed terminal categories
+- Strict unknown-field-rejecting snapshot/reset JSON messages bounded to 64 KiB
+- Managed-flow and DNS event integration without destination, payload, token, path, or underlying error descriptions
+- Packet Tunnel diagnostics source combining core counters with coordinator/limiter live gauges without double counting
+- Connected/reasserting-only app messaging with one-shot continuations
+- Foreground two-second refresh, background/disconnect cancellation, manual refresh/reset, and destination-free SwiftUI display
+- Swift core and syntax/config validation complete; Apple IPC, Xcode build, and physical-iPad behavior remain release gates
+- Tun2SocksKit 5.16.0 has no stable stats API in the resolved dependency, so HEV packet counters remain unavailable rather than inferred
+
 ## v0.3: high-performance UDP
 
 - Swift Network.framework to Go QUIC interoperability spike

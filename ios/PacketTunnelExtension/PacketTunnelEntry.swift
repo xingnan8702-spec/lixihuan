@@ -94,6 +94,7 @@ final class PacketTunnelEntry: PacketTunnelProvider {
         try Task.checkCancellation()
 
         do {
+            let diagnostics = TunnelDiagnostics()
             let fakeIPStore = FakeIPStore()
             let limiter = FlowLimiter()
             let directTransport = try NetworkFrameworkDirectTransport()
@@ -110,7 +111,8 @@ final class PacketTunnelEntry: PacketTunnelProvider {
             let coordinator = ManagedFlowCoordinator(
                 router: router,
                 limiter: limiter,
-                fakeIPStore: fakeIPStore
+                fakeIPStore: fakeIPStore,
+                diagnostics: diagnostics
             )
             let directDNSServer = try Self.dnsServerAddress(configuration.directDNSHost)
             let proxyDNSServer = try Self.dnsServerAddress(configuration.proxyDNSHost)
@@ -129,23 +131,34 @@ final class PacketTunnelEntry: PacketTunnelProvider {
             let dnsService = DNSProxyService(
                 core: dnsCore,
                 directResolver: directDNSResolver,
-                proxyResolver: proxyDNSResolver
+                proxyResolver: proxyDNSResolver,
+                diagnostics: diagnostics
             )
             let udpRelay = LocalSOCKS5UDPRelay(
                 coordinator: coordinator,
                 dnsService: dnsService,
+                diagnostics: diagnostics,
                 fatalErrorHandler: { [weak self] error in
-                    self?.cancelTunnelWithError(error)
+                    Task { @MainActor [weak self] in
+                        await diagnostics.recordTerminalError(.udpRelay)
+                        await diagnostics.recordTransportFailure()
+                        self?.cancelTunnelWithError(error)
+                    }
                 }
             )
             let bridge = LocalSOCKS5TCPBridge(
                 coordinator: coordinator,
                 dnsService: dnsService,
-                udpRelay: udpRelay
+                udpRelay: udpRelay,
+                diagnostics: diagnostics,
+                fatalErrorHandler: { [weak self] error in
+                    self?.cancelTunnelWithError(error)
+                }
             )
             let adapter = HEVPacketStackAdapter(
                 bridge: bridge,
                 coordinator: coordinator,
+                diagnostics: diagnostics,
                 ruleStore: ruleStore,
                 fakeIPStore: fakeIPStore,
                 limiter: limiter,
@@ -161,7 +174,9 @@ final class PacketTunnelEntry: PacketTunnelProvider {
                 networkSettings: Self.defaultNetworkSettings(
                     remoteAddress: configuration.relayHostname,
                     installFakeDNS: true
-                )
+                ),
+                diagnostics: diagnostics,
+                diagnosticsSource: adapter
             )
         } catch let error as PacketTunnelEntryError {
             throw error

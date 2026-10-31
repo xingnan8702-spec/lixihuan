@@ -19,6 +19,40 @@ struct ContentView: View {
                     }
                 }
 
+                Section(header: Text("Diagnostics")) {
+                    if let diagnostics = viewModel.diagnostics {
+                        diagnosticRow("Uploaded", viewModel.diagnosticsBytesUp)
+                        diagnosticRow("Downloaded", viewModel.diagnosticsBytesDown)
+                        diagnosticRow("Active TCP", "\(diagnostics.activeTCP)")
+                        diagnosticRow("Active UDP", "\(diagnostics.activeUDP)")
+                        diagnosticRow(
+                            "DNS failures",
+                            "\(diagnostics.dnsFailures) / \(diagnostics.dnsTotal)"
+                        )
+                        diagnosticRow("Rejected flows", "\(diagnostics.rejectedFlows)")
+                        diagnosticRow(
+                            "Resource rejections",
+                            "\(diagnostics.resourceRejections)"
+                        )
+                        diagnosticRow(
+                            "Last error",
+                            diagnostics.lastTerminalErrorCategory?.rawValue ?? "None"
+                        )
+                    } else {
+                        Text(viewModel.diagnosticsMessage ?? "Connect to view aggregate diagnostics.")
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Button("Refresh") { viewModel.refreshDiagnostics() }
+                            .disabled(!viewModel.canRefreshDiagnostics)
+                        Button("Reset") { viewModel.resetDiagnostics() }
+                            .disabled(!viewModel.canRefreshDiagnostics)
+                    }
+                    if viewModel.isDiagnosticsRefreshing {
+                        ProgressView()
+                    }
+                }
+
                 Section(
                     header: Text("Relay"),
                     footer: Text("The token is stored only in the shared Keychain and is cleared from this field after saving.")
@@ -113,18 +147,30 @@ struct ContentView: View {
                 viewModel.reportRuleSelectionFailure()
             }
         }
-        .onAppear { viewModel.load() }
+        .onAppear {
+            viewModel.load()
+            viewModel.sceneDidBecomeActive()
+        }
         .onChange(of: scenePhase) { phase in
             switch phase {
             case .active:
-                viewModel.refreshVPNProfile()
+                viewModel.sceneDidBecomeActive()
             case .background:
-                viewModel.clearSensitiveInput()
+                viewModel.sceneDidEnterBackground()
             case .inactive:
                 break
             @unknown default:
                 viewModel.clearSensitiveInput()
             }
+        }
+    }
+
+    @ViewBuilder
+    private func diagnosticRow(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text(value).foregroundColor(.secondary)
         }
     }
 

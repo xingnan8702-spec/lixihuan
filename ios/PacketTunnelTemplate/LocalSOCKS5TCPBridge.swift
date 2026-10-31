@@ -18,6 +18,7 @@ public enum LocalSOCKS5TCPBridgeError: Error, Sendable {
 /// CONNECT and UDP ASSOCIATE are dispatched without changing the selected action.
 @MainActor
 public final class LocalSOCKS5TCPBridge {
+    public typealias FatalErrorHandler = @MainActor @Sendable (LocalSOCKS5TCPBridgeError) -> Void
     public static let pumpChunkBytes = 32 * 1_024
     public static let maximumSessions = 1_024
 
@@ -32,21 +33,28 @@ public final class LocalSOCKS5TCPBridge {
     private let coordinator: ManagedFlowCoordinator
     private let dnsService: DNSProxyService
     private let udpRelay: LocalSOCKS5UDPRelay
+    private let diagnostics: TunnelDiagnostics?
+    private let fatalErrorHandler: FatalErrorHandler?
     private let queue = DispatchQueue(label: "ipad-proxy.local-socks5")
     private var state: State = .idle
     private var listener: NWListener?
     private var sessions: [UUID: Task<Void, Never>] = [:]
     private var connections: [UUID: NWConnection] = [:]
     private var stopTask: Task<Void, Never>?
+    private var didReportFatalError = false
 
     public init(
         coordinator: ManagedFlowCoordinator,
         dnsService: DNSProxyService,
-        udpRelay: LocalSOCKS5UDPRelay
+        udpRelay: LocalSOCKS5UDPRelay,
+        diagnostics: TunnelDiagnostics? = nil,
+        fatalErrorHandler: FatalErrorHandler? = nil
     ) {
         self.coordinator = coordinator
         self.dnsService = dnsService
         self.udpRelay = udpRelay
+        self.diagnostics = diagnostics
+        self.fatalErrorHandler = fatalErrorHandler
     }
 
     /// Starts a listener constrained to 127.0.0.1 and waits for Network.framework
@@ -99,9 +107,16 @@ public final class LocalSOCKS5TCPBridge {
                 listener.cancel()
             }
             try Task.checkCancellation()
-            listener.stateUpdateHandler = nil
             guard case .starting = state else { throw CancellationError() }
             state = .ready(port)
+            listener.stateUpdateHandler = { [weak self] listenerState in
+                switch listenerState {
+                case .failed, .cancelled:
+                    Task { @MainActor in await self?.listenerFailedAfterReady() }
+                default:
+                    break
+                }
+            }
             return port
         } catch {
             listener.stateUpdateHandler = nil
@@ -145,8 +160,19 @@ public final class LocalSOCKS5TCPBridge {
         stopTask = nil
     }
 
+    private func listenerFailedAfterReady() async {
+        guard case .ready = state, !didReportFatalError else { return }
+        didReportFatalError = true
+        await diagnostics?.recordTransportFailure()
+        await diagnostics?.recordTerminalError(.bridge)
+        let handler = fatalErrorHandler
+        await stop()
+        handler?(.listenerFailed)
+    }
+
     private func accept(_ connection: NWConnection) {
         guard case .ready = state, sessions.count < Self.maximumSessions else {
+            Task { await diagnostics?.recordResourceRejection() }
             connection.cancel()
             return
         }
