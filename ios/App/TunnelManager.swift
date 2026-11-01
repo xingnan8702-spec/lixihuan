@@ -1,7 +1,7 @@
 #if canImport(NetworkExtension)
 import Combine
 import Foundation
-import NetworkExtension
+@preconcurrency import NetworkExtension
 import IPadProxyCore
 
 @MainActor
@@ -168,20 +168,21 @@ final class TunnelManager: ObservableObject {
     }
 
     private func loadAllManagers() async throws -> [NETunnelProviderManager] {
-        try await withCheckedThrowingContinuation { continuation in
+        let result: TunnelManagerList = try await withCheckedThrowingContinuation { continuation in
             let once = ContinuationOnce(continuation)
             NETunnelProviderManager.loadAllFromPreferences { managers, error in
                 if let error {
                     once.resume(throwing: error)
                 } else {
-                    once.resume(returning: managers ?? [])
+                    once.resume(returning: TunnelManagerList(managers ?? []))
                 }
             }
         }
+        return result.values
     }
 
     private func save(_ manager: NETunnelProviderManager) async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let once = ContinuationOnce(continuation)
             manager.saveToPreferences { error in
                 if let error {
@@ -194,7 +195,7 @@ final class TunnelManager: ObservableObject {
     }
 
     private func reload(_ manager: NETunnelProviderManager) async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let once = ContinuationOnce(continuation)
             manager.loadFromPreferences { error in
                 if let error {
@@ -204,6 +205,14 @@ final class TunnelManager: ObservableObject {
                 }
             }
         }
+    }
+}
+
+private struct TunnelManagerList: @unchecked Sendable {
+    let values: [NETunnelProviderManager]
+
+    init(_ values: [NETunnelProviderManager]) {
+        self.values = values
     }
 }
 
