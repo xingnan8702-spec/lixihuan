@@ -71,7 +71,7 @@ public actor NetworkDirectUDPAssociation: UDPDatagramAssociation {
         guard !closed else { throw TransportError.closed }
         try Task.checkCancellation()
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 connection.send(
                     content: payload,
                     contentContext: .defaultMessage,

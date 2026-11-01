@@ -128,7 +128,7 @@ public actor NetworkTCPByteStream: TCPByteStream {
         guard !closed else { throw TransportError.closed }
         try Task.checkCancellation()
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 connection.send(content: bytes, completion: .contentProcessed { error in
                     if let error { continuation.resume(throwing: error) }
                     else { continuation.resume() }
@@ -149,7 +149,7 @@ public actor NetworkTCPByteStream: TCPByteStream {
         guard !closed else { throw TransportError.closed }
         try Task.checkCancellation()
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 connection.send(content: nil, contentContext: .finalMessage, isComplete: true,
                                 completion: .contentProcessed { error in
                     if let error { continuation.resume(throwing: error) }
