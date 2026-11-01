@@ -207,7 +207,7 @@ final class TunnelManager: ObservableObject {
     }
 }
 
-private final class ContinuationOnce<Value>: @unchecked Sendable {
+private final class ContinuationOnce<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Value, Error>?
 

@@ -482,7 +482,7 @@ public final class LocalSOCKS5TCPBridge {
     }
 }
 
-private final class BridgeContinuationOnce<Value>: @unchecked Sendable {
+private final class BridgeContinuationOnce<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Value, Error>?
 

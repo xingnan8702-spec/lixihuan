@@ -613,7 +613,7 @@ public final class LocalSOCKS5UDPRelay {
     private static var now: UInt64 { DispatchTime.now().uptimeNanoseconds }
 }
 
-private final class UDPRelayContinuationOnce<Value>: @unchecked Sendable {
+private final class UDPRelayContinuationOnce<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Value, Error>?
 
