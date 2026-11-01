@@ -22,7 +22,7 @@ struct PacketTunnelDependencies {
 
 /// Fail-closed lifecycle template. A containing extension must override
 /// `makeDependencies()` with the reviewed packet stack and configured core.
-class PacketTunnelProvider: NEPacketTunnelProvider {
+class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     enum IntegrationError: LocalizedError {
         case missingDependencies
         case invalidLifecycleState
