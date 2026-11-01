@@ -197,7 +197,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     @MainActor
     private func install(_ settings: NEPacketTunnelNetworkSettings) async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             setTunnelNetworkSettings(settings) { error in
                 if let error { continuation.resume(throwing: error) }
                 else { continuation.resume() }
