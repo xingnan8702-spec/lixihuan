@@ -28,6 +28,10 @@ QUIC is intentionally deferred until Apple Network.framework interoperability ca
 - `deploy`: service and configuration examples
 - `docs`: architecture, security, testing, and roadmap
 
+## v0.2.7 Apple SDK CI
+
+GitHub Actions now validates Go test/vet/race/build, Swift Core debug/release tests, XcodeGen project generation, Tun2SocksKit 5.16.0 package resolution, and an unsigned Apple iOS Simulator SDK build of both the containing App and Packet Tunnel Extension. The first complete Apple SDK build passed after CI exposed and guided fixes for iOS 15 API availability, continuation inference, NetworkExtension Sendable boundaries, and notification observer isolation. See `docs/v0.2.7-status.md`.
+
 ## v0.2.6 aggregate diagnostics
 
 v0.2.6 adds a privacy-preserving diagnostics actor and a strict, 64 KiB-bounded app/extension JSON message contract for snapshot and reset. Metrics contain only aggregate uptime, active/high-water TCP and UDP flows, directional byte/packet totals, DNS totals/failures, flow/resource rejections, transport failures, and a fixed terminal-error category. Managed TCP/UDP wrappers account successful `Data` transfers and idempotent cleanup; DNS accounts every query and each failed query once without treating local REJECT responses as transport failures.

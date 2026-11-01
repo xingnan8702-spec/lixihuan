@@ -71,6 +71,15 @@ This version is published on its review branch. The Apple Packet Tunnel still ne
 - Swift core and syntax/config validation complete; Apple IPC, Xcode build, and physical-iPad behavior remain release gates
 - Tun2SocksKit 5.16.0 has no stable stats API in the resolved dependency, so HEV packet counters remain unavailable rather than inferred
 
+## v0.2.7: Apple SDK continuous integration
+
+- Least-privilege Go, Swift Core, and unsigned iOS build jobs
+- XcodeGen project generation and Tun2SocksKit package resolution
+- Real Apple SDK Swift 6 typecheck/link for App and Packet Tunnel Extension
+- Compatibility fixes discovered by macOS CI
+
+Physical-device signing and networking remain separate release gates.
+
 ## v0.3: high-performance UDP
 
 - Swift Network.framework to Go QUIC interoperability spike

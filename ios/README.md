@@ -1,8 +1,8 @@
-# iOS v0.2.6 聚合诊断与 Packet Tunnel IPC
+# iOS v0.2.7 Apple SDK CI 与诊断接线
 
 `ios/` 包含可在 Linux 测试的 Swift 6 core、SwiftUI iPad containing app、Packet Tunnel Extension 和 XcodeGen 工程描述。v0.2.6 在 v0.2.5 TCP/UDP/DNS 数据路径上增加隐私保护的聚合诊断、严格且限制为 64 KiB 的 app/extension JSON IPC、前台两秒刷新以及手动刷新/重置。诊断只包含 uptime、TCP/UDP active/high-water、上下行 bytes/packets、DNS total/failures、flow/resource rejection、transport failure 和固定 terminal error category，不包含目标、域名、IP、端口、token、路径、payload 或底层错误描述。
 
-当前代码仍不能仅凭 Linux 测试称为可发布 VPN。Linux 没有 Apple SDK；Network.framework、NetworkExtension provider messaging、Tun2SocksKit 5.16.0、utun、路径 MTU、取消和资源回收都必须在 Xcode 与物理 iPad 验证。当前解析到的 Tun2SocksKit 5.16.0 没有稳定 `Socks5Tunnel.stats` API，因此没有猜测或重复合并 HEV packet counter，managed core counter 是权威来源。
+当前代码已经通过 GitHub macOS runner 的 XcodeGen、Tun2SocksKit package resolution 和 Apple iOS Simulator SDK 无签名编译。该结果证明 App 与 Packet Tunnel Extension 可以在当前 CI Xcode 版本下 typecheck/link，但仍不能替代真实 entitlement、签名、utun、路径 MTU、取消、资源回收和物理 iPad 网络行为验证。当前解析到的 Tun2SocksKit 5.16.0 没有稳定 `Socks5Tunnel.stats` API，因此没有猜测或重复合并 HEV packet counter，managed core counter 是权威来源。
 
 ## Linux 验证
 
