@@ -51,24 +51,19 @@ final class TunnelManager: ObservableObject {
     private let providerBundleIdentifier: String
     private let appGroupIdentifier: String
     private var manager: NETunnelProviderManager?
-    private var statusObserver: NSObjectProtocol?
+    private var statusObserver: NotificationObservation?
 
     init(providerBundleIdentifier: String, appGroupIdentifier: String) {
         self.providerBundleIdentifier = providerBundleIdentifier
         self.appGroupIdentifier = appGroupIdentifier
-        statusObserver = NotificationCenter.default.addObserver(
+        let token = NotificationCenter.default.addObserver(
             forName: .NEVPNStatusDidChange,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.refreshStatus() }
         }
-    }
-
-    deinit {
-        if let statusObserver {
-            NotificationCenter.default.removeObserver(statusObserver)
-        }
+        statusObserver = NotificationObservation(token)
     }
 
     func load() async throws {
@@ -205,6 +200,18 @@ final class TunnelManager: ObservableObject {
                 }
             }
         }
+    }
+}
+
+private final class NotificationObservation: @unchecked Sendable {
+    private let token: any NSObjectProtocol
+
+    init(_ token: any NSObjectProtocol) {
+        self.token = token
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(token)
     }
 }
 
