@@ -12,16 +12,26 @@ import (
 	"net/netip"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/example/ipad-proxy/internal/netutil"
 	"github.com/example/ipad-proxy/internal/protocol"
 )
 
+const (
+	DefaultMaxConnections     = 1024
+	DefaultMaxHandshakes      = 64
+	DefaultMaxUDPAssociations = 256
+)
+
 type Config struct {
 	TLSConfig                *tls.Config
 	TokenHashes              [][32]byte
 	AllowPrivateDestinations bool
+	MaxConnections           int
+	MaxHandshakes            int
+	MaxUDPAssociations       int
 	HandshakeTimeout         time.Duration
 	DialTimeout              time.Duration
 	IOTimeout                time.Duration
@@ -31,11 +41,52 @@ type Config struct {
 	Resolver                 *net.Resolver
 }
 
+type MetricsSnapshot struct {
+	ActiveSessions          int64
+	ActiveHandshakes        int64
+	ActiveUDPAssociations   int64
+	RejectedConnections     uint64
+	RejectedHandshakes      uint64
+	RejectedUDPAssociations uint64
+}
+
+type permit struct {
+	limit    int64
+	active   atomic.Int64
+	rejected atomic.Uint64
+}
+
+func newPermit(limit int) *permit {
+	return &permit{limit: int64(limit)}
+}
+
+func (p *permit) tryAcquire() bool {
+	for {
+		active := p.active.Load()
+		if active >= p.limit {
+			p.rejected.Add(1)
+			return false
+		}
+		if p.active.CompareAndSwap(active, active+1) {
+			return true
+		}
+	}
+}
+
+func (p *permit) release() {
+	if active := p.active.Add(-1); active < 0 {
+		panic("server: released unheld permit")
+	}
+}
+
 type Server struct {
-	cfg    Config
-	mu     sync.Mutex
-	active map[net.Conn]struct{}
-	wg     sync.WaitGroup
+	cfg        Config
+	mu         sync.Mutex
+	active     map[net.Conn]struct{}
+	wg         sync.WaitGroup
+	sessions   *permit
+	handshakes *permit
+	udp        *permit
 }
 
 func New(cfg Config) (*Server, error) {
@@ -51,13 +102,42 @@ func New(cfg Config) (*Server, error) {
 	if cfg.HandshakeTimeout <= 0 || cfg.DialTimeout <= 0 || cfg.IOTimeout <= 0 || cfg.UDPIdleTimeout <= 0 || cfg.ShutdownTimeout <= 0 {
 		return nil, errors.New("all timeouts must be positive")
 	}
+	if cfg.MaxConnections < 0 || cfg.MaxHandshakes < 0 || cfg.MaxUDPAssociations < 0 {
+		return nil, errors.New("connection limits must not be negative")
+	}
+	if cfg.MaxConnections == 0 {
+		cfg.MaxConnections = DefaultMaxConnections
+	}
+	if cfg.MaxHandshakes == 0 {
+		cfg.MaxHandshakes = DefaultMaxHandshakes
+	}
+	if cfg.MaxUDPAssociations == 0 {
+		cfg.MaxUDPAssociations = DefaultMaxUDPAssociations
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
 	if cfg.Resolver == nil {
 		cfg.Resolver = net.DefaultResolver
 	}
-	return &Server{cfg: cfg, active: make(map[net.Conn]struct{})}, nil
+	return &Server{
+		cfg:        cfg,
+		active:     make(map[net.Conn]struct{}),
+		sessions:   newPermit(cfg.MaxConnections),
+		handshakes: newPermit(cfg.MaxHandshakes),
+		udp:        newPermit(cfg.MaxUDPAssociations),
+	}, nil
+}
+
+func (s *Server) Snapshot() MetricsSnapshot {
+	return MetricsSnapshot{
+		ActiveSessions:          s.sessions.active.Load(),
+		ActiveHandshakes:        s.handshakes.active.Load(),
+		ActiveUDPAssociations:   s.udp.active.Load(),
+		RejectedConnections:     s.sessions.rejected.Load(),
+		RejectedHandshakes:      s.handshakes.rejected.Load(),
+		RejectedUDPAssociations: s.udp.rejected.Load(),
+	}
 }
 
 func contains(values []string, want string) bool {
@@ -80,11 +160,16 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			}
 			return err
 		}
+		if !s.sessions.tryAcquire() {
+			_ = raw.Close()
+			continue
+		}
 		tlsConn := tls.Server(raw, s.cfg.TLSConfig)
 		s.track(tlsConn, true)
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			defer s.sessions.release()
 			defer s.track(tlsConn, false)
 			defer tlsConn.Close()
 			s.handle(ctx, tlsConn)
@@ -113,15 +198,30 @@ func (s *Server) track(c net.Conn, add bool) {
 		delete(s.active, c)
 	}
 }
+
 func (s *Server) closeActive() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	connections := make([]net.Conn, 0, len(s.active))
 	for c := range s.active {
+		connections = append(connections, c)
+	}
+	s.mu.Unlock()
+	for _, c := range connections {
 		_ = c.Close()
 	}
 }
 
 func (s *Server) handle(parent context.Context, conn *tls.Conn) {
+	if !s.handshakes.tryAcquire() {
+		return
+	}
+	handshakeHeld := true
+	defer func() {
+		if handshakeHeld {
+			s.handshakes.release()
+		}
+	}()
+
 	ctx, cancel := context.WithTimeout(parent, s.cfg.HandshakeTimeout)
 	defer cancel()
 	if err := conn.HandshakeContext(ctx); err != nil {
@@ -147,6 +247,9 @@ func (s *Server) handle(parent context.Context, conn *tls.Conn) {
 		s.writeResponse(conn, protocol.StatusAuthFailed, "authentication failed")
 		return
 	}
+	s.handshakes.release()
+	handshakeHeld = false
+
 	_ = conn.SetDeadline(time.Time{})
 	switch req.Command {
 	case protocol.CommandTCPConnect:

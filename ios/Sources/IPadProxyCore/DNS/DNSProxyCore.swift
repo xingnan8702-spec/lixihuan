@@ -11,6 +11,14 @@ public enum DNSProxyError: Error, Equatable, Sendable {
     case messageTooLarge
 }
 
+public enum DNSUpstreamValidationError: Error, Equatable, Sendable {
+    case malformedResponse
+    case transactionIDMismatch
+    case responseFlagMissing
+    case opcodeMismatch
+    case questionMismatch
+}
+
 public enum DNSDecision: Equatable, Sendable {
     case respond(Data)
     /// The selected action is preserved so the I/O layer cannot accidentally
@@ -88,6 +96,39 @@ public actor DNSProxyCore {
         return Data(bytes[2...])
     }
 
+    /// Validates the DNS properties that bind an upstream response to its
+    /// original query. The returned value is the response's truncation bit.
+    public nonisolated static func validateUpstreamResponse(
+        _ response: Data,
+        for query: Data
+    ) throws -> Bool {
+        let expected: DNSQuestion
+        let actual: DNSResponseQuestion
+        do {
+            expected = try DNSMessageParser.parse(query)
+            actual = try DNSMessageParser.parseResponse(response)
+        } catch {
+            throw DNSUpstreamValidationError.malformedResponse
+        }
+
+        guard actual.id == expected.id else {
+            throw DNSUpstreamValidationError.transactionIDMismatch
+        }
+        guard actual.isResponse else {
+            throw DNSUpstreamValidationError.responseFlagMissing
+        }
+        guard actual.opcode == expected.opcode else {
+            throw DNSUpstreamValidationError.opcodeMismatch
+        }
+        guard actual.name == expected.name,
+              actual.type == expected.type,
+              actual.queryClass == expected.queryClass
+        else {
+            throw DNSUpstreamValidationError.questionMismatch
+        }
+        return actual.isTruncated
+    }
+
     private func response(
         for question: DNSQuestion,
         rcode: UInt16,
@@ -131,13 +172,66 @@ public actor DNSProxyCore {
 
 private struct DNSQuestion: Sendable {
     let id: UInt16
+    let opcode: UInt16
     let recursionDesired: Bool
     let name: String
     let type: UInt16
     let queryClass: UInt16
 }
 
+private struct DNSResponseQuestion: Sendable {
+    let id: UInt16
+    let isResponse: Bool
+    let isTruncated: Bool
+    let opcode: UInt16
+    let name: String
+    let type: UInt16
+    let queryClass: UInt16
+}
+
 private enum DNSMessageParser {
+    static func parseResponse(_ data: Data) throws -> DNSResponseQuestion {
+        let bytes = [UInt8](data)
+        guard (12...Int(UInt16.max)).contains(bytes.count) else {
+            throw DNSProxyError.truncated
+        }
+
+        let id = uint16(bytes, 0)
+        let flags = uint16(bytes, 2)
+        let questionCount = uint16(bytes, 4)
+        guard questionCount == 1 else { throw DNSProxyError.invalidQuestionCount(questionCount) }
+
+        var offset = 12
+        let name = try decodeName(bytes, offset: &offset)
+        guard offset + 4 <= bytes.count else { throw DNSProxyError.truncated }
+        let type = uint16(bytes, offset)
+        let queryClass = uint16(bytes, offset + 2)
+        offset += 4
+
+        let recordCount = Int(uint16(bytes, 6))
+            + Int(uint16(bytes, 8))
+            + Int(uint16(bytes, 10))
+        for _ in 0..<recordCount {
+            try skipName(bytes, offset: &offset)
+            guard offset + 10 <= bytes.count else { throw DNSProxyError.truncated }
+            let dataLength = Int(uint16(bytes, offset + 8))
+            offset += 10
+            guard offset + dataLength <= bytes.count else { throw DNSProxyError.truncated }
+            offset += dataLength
+        }
+        guard offset == bytes.count else { throw DNSProxyError.trailingBytes }
+
+        return DNSResponseQuestion(
+            id: id,
+            isResponse: flags & 0x8000 != 0,
+            isTruncated: flags & 0x0200 != 0,
+            opcode: (flags >> 11) & 0x0f,
+            name: name,
+            type: type,
+            queryClass: queryClass
+        )
+    }
+
     static func parse(_ data: Data) throws -> DNSQuestion {
         let bytes = [UInt8](data)
         guard bytes.count >= 12 else { throw DNSProxyError.truncated }
@@ -179,6 +273,7 @@ private enum DNSMessageParser {
         guard offset == bytes.count else { throw DNSProxyError.trailingBytes }
         return DNSQuestion(
             id: id,
+            opcode: (flags >> 11) & 0x0f,
             recursionDesired: flags & 0x0100 != 0,
             name: name,
             type: type,
@@ -199,6 +294,44 @@ private enum DNSMessageParser {
         result.append(0)
         guard result.count <= 255 else { throw DNSProxyError.invalidName }
         return result
+    }
+
+    private static func skipName(_ bytes: [UInt8], offset: inout Int) throws {
+        var cursor = offset
+        var consumed: Int?
+        var visited: Set<Int> = []
+        var expandedLength = 1
+
+        while true {
+            guard cursor < bytes.count else { throw DNSProxyError.truncated }
+            let length = Int(bytes[cursor])
+            if length == 0 {
+                if consumed == nil { consumed = cursor + 1 }
+                break
+            }
+            if length & 0xc0 == 0xc0 {
+                guard cursor + 1 < bytes.count else { throw DNSProxyError.truncated }
+                let pointer = (length & 0x3f) << 8 | Int(bytes[cursor + 1])
+                guard pointer >= 12, pointer < cursor, pointer < bytes.count else {
+                    throw DNSProxyError.invalidName
+                }
+                if consumed == nil { consumed = cursor + 2 }
+                guard visited.insert(pointer).inserted, visited.count <= 128 else {
+                    throw DNSProxyError.compressionLoop
+                }
+                cursor = pointer
+                continue
+            }
+            guard length & 0xc0 == 0,
+                  (1...63).contains(length),
+                  cursor + 1 + length <= bytes.count
+            else { throw DNSProxyError.invalidName }
+            expandedLength += length + 1
+            guard expandedLength <= 255 else { throw DNSProxyError.invalidName }
+            cursor += 1 + length
+        }
+        guard let consumed else { throw DNSProxyError.invalidName }
+        offset = consumed
     }
 
     private static func decodeName(_ bytes: [UInt8], offset: inout Int) throws -> String {

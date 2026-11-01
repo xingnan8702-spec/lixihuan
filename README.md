@@ -28,9 +28,41 @@ QUIC is intentionally deferred until Apple Network.framework interoperability ca
 - `deploy`: service and configuration examples
 - `docs`: architecture, security, testing, and roadmap
 
-## v0.2 status
+## v0.2.7 Apple SDK CI
 
-The Go relay and local SOCKS5 client are runnable and covered by local TCP/UDP end-to-end tests. The Swift core now includes indexed imported rules, bounded dual-stack Fake IP allocation, DNS A/AAAA synthesis, EDNS validation, action-preserving DNS forwarding, atomic local rule activation, fixed-target DIRECT/PROXY transport boundaries, and credential interfaces. Apple-only templates provide Network.framework TLS and DIRECT adapters, Keychain/App Group storage, and a fail-closed Packet Tunnel lifecycle.
+GitHub Actions now validates Go test/vet/race/build, Swift Core debug/release tests, XcodeGen project generation, Tun2SocksKit 5.16.0 package resolution, and an unsigned Apple iOS Simulator SDK build of both the containing App and Packet Tunnel Extension. The first complete Apple SDK build passed after CI exposed and guided fixes for iOS 15 API availability, continuation inference, NetworkExtension Sendable boundaries, and notification observer isolation. See `docs/v0.2.7-status.md`.
+
+## v0.2.6 aggregate diagnostics
+
+v0.2.6 adds a privacy-preserving diagnostics actor and a strict, 64 KiB-bounded app/extension JSON message contract for snapshot and reset. Metrics contain only aggregate uptime, active/high-water TCP and UDP flows, directional byte/packet totals, DNS totals/failures, flow/resource rejections, transport failures, and a fixed terminal-error category. Managed TCP/UDP wrappers account successful `Data` transfers and idempotent cleanup; DNS accounts every query and each failed query once without treating local REJECT responses as transport failures.
+
+The Packet Tunnel extension retains the diagnostics source and answers bounded provider messages. The app requests snapshots only while connected or reasserting, refreshes every two seconds while foreground-active, cancels work when backgrounded or disconnected, and offers manual refresh/reset. The UI does not display destinations. Tun2SocksKit 5.16.0 does not expose a stable `Socks5Tunnel.stats` API in the resolved package, so v0.2.6 does not invent or merge HEV packet counters; managed-core counters remain authoritative.
+
+Swift core debug/release tests and syntax/config parsing are local evidence only. Apple IPC, NetworkExtension callback behavior, Xcode strict-concurrency typechecking/linking, and the complete data path still require Xcode and a physical iPad. See `docs/v0.2.6-status.md`.
+
+## v0.2.5 local UDP and DNS integration
+
+The local v0.2.5 recovery adds strict SOCKS5 UDP ASSOCIATE and UDP datagram codecs, a loopback UDP relay with 256 fixed-target sessions and 60-second idle expiry, action-preserving DIRECT/PROXY DNS upstream adapters, Fake DNS UDP/TCP interception, and separate literal-IP DNS settings (`223.5.5.5` for DIRECT and `1.1.1.1` for PROXY by default). Legacy v0.2.4.1 provider JSON receives only those two defaults; unknown fields still fail closed.
+
+HEV now uses `udp: 'udp'`, and the extension installs the Fake DNS settings only after constructing both resolvers, `DNSProxyService`, the UDP relay, and the SOCKS bridge. Resolver, routing, and transport errors never switch DIRECT/PROXY action. Linux Swift debug/release tests and syntax/config parsing are local evidence only. Apple target typechecking/linking, Tun2SocksKit 5.16.0 behavior, utun startup, UDP path MTU, DNS interception, stop cancellation, and memory bounds still require Xcode and a physical iPad before release. See `docs/v0.2.5-status.md` and `THIRD_PARTY_NOTICES.md`.
+
+## v0.2.3 local app shell
+
+The current local branch adds an iPad-only SwiftUI containing app, secure relay/token configuration, JSON rule import, `NETunnelProviderManager` lifecycle control, App Group/Keychain sharing, Packet Tunnel target metadata, entitlements, and an XcodeGen project description. The extension intentionally remains fail closed until a reviewed packet stack and local SOCKS bridge are integrated.
+
+These v0.2.3 changes have not been pushed.
+
+## v0.2.2 status
+
+The `feature/ipad-proxy-v0.2.2-local` branch adds managed TCP/UDP flow ownership, a registry-backed `closeAll()`, fail-closed Fake IP restoration, and an action-preserving DNS upstream service with response validation, timeout, inflight limits, and same-route TCP retry. Swift debug and release suites contain 101 passing tests.
+
+The branch name retains its local-development suffix for history, but this version is now ready for review through GitHub.
+
+## v0.2.1 status
+
+The Go relay and local SOCKS5 client are runnable and covered by local TCP/UDP end-to-end tests. The relay now bounds total sessions, concurrent handshakes, UDP associations, and contacted UDP peers. The Swift core adds Fake IP flow leases with grace/quarantine, bounded byte queues, flow permits, and a platform-independent tunnel lifecycle controller.
+
+Go and Swift both consume `testdata/protocol-v1.json`, so protocol changes must preserve the same exact golden wire bytes in both implementations. Apple-only templates still provide Network.framework TLS and DIRECT adapters, Keychain/App Group storage, and a fail-closed Packet Tunnel bridge.
 
 The Packet Tunnel remains an integration template rather than an installable VPN because the repository does not yet contain a reviewed lwIP adapter, Xcode targets, entitlements, provisioning, or physical-iPad validation. See `docs/v0.2-design.md` and `docs/v0.2-acceptance.md` for the exact boundary.
 

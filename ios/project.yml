@@ -1,0 +1,85 @@
+name: IPadProxy
+options:
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+packages:
+  IPadProxyCore:
+    path: .
+  Tun2SocksKit:
+    url: https://github.com/EbrahimTahernejad/Tun2SocksKit.git
+    exactVersion: 5.16.0
+
+targets:
+  IPadProxy:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: App
+      - path: PacketTunnelTemplate/AppGroupConfigurationStore.swift
+      - path: PacketTunnelTemplate/KeychainCredentialStore.swift
+    info:
+      path: Config/App-Info.plist
+    entitlements:
+      path: Config/App.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ipadproxy
+        PRODUCT_NAME: IPadProxy
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        MARKETING_VERSION: "0.2.7"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "2"
+        GENERATE_INFOPLIST_FILE: NO
+    dependencies:
+      - package: IPadProxyCore
+        product: IPadProxyCore
+      - sdk: NetworkExtension.framework
+      - sdk: Security.framework
+      - target: PacketTunnelExtension
+        embed: true
+
+  PacketTunnelExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: PacketTunnelExtension
+      - path: PacketTunnelTemplate
+    info:
+      path: Config/PacketTunnel-Info.plist
+    entitlements:
+      path: Config/PacketTunnel.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ipadproxy.PacketTunnel
+        PRODUCT_NAME: PacketTunnelExtension
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        MARKETING_VERSION: "0.2.7"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "2"
+        GENERATE_INFOPLIST_FILE: NO
+        APPLICATION_EXTENSION_API_ONLY: YES
+    dependencies:
+      - package: IPadProxyCore
+        product: IPadProxyCore
+      - package: Tun2SocksKit
+        product: Tun2SocksKit
+      - sdk: Network.framework
+      - sdk: NetworkExtension.framework
+      - sdk: Security.framework
+
+schemes:
+  IPadProxy:
+    build:
+      targets:
+        IPadProxy: all
+        PacketTunnelExtension: all
+    run:
+      config: Debug
+    archive:
+      config: Release

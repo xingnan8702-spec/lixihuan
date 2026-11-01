@@ -1,37 +1,6 @@
 #if os(iOS) || os(macOS)
 import Foundation
-
-public struct ProviderConfiguration: Codable, Equatable, Sendable {
-    public let relayHostname: String
-    public let relayPort: UInt16
-    public let rulesFilename: String
-
-    private enum CodingKeys: String, CodingKey {
-        case relayHostname, relayPort, rulesFilename
-    }
-
-    public init(relayHostname: String, relayPort: UInt16, rulesFilename: String = "rules.json") throws {
-        guard !relayHostname.isEmpty, relayHostname.utf8.count <= 253,
-              relayPort != 0,
-              !rulesFilename.isEmpty,
-              rulesFilename != ".", rulesFilename != "..",
-              URL(fileURLWithPath: rulesFilename).lastPathComponent == rulesFilename,
-              !rulesFilename.contains("/"), !rulesFilename.contains("\\")
-        else { throw AppGroupConfigurationError.invalidConfiguration }
-        self.relayHostname = relayHostname
-        self.relayPort = relayPort
-        self.rulesFilename = rulesFilename
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        try self.init(
-            relayHostname: container.decode(String.self, forKey: .relayHostname),
-            relayPort: container.decode(UInt16.self, forKey: .relayPort),
-            rulesFilename: container.decode(String.self, forKey: .rulesFilename)
-        )
-    }
-}
+import IPadProxyCore
 
 public enum AppGroupConfigurationError: Error, Sendable {
     case containerUnavailable
